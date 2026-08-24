@@ -141,7 +141,7 @@ async def get_tests(telegram_id: int) -> ContentBundle:
 
     # «Только общие» — учительский слой не смотрим вовсе
     if source == subjects_cfg.SOURCE_BASE:
-        rows = list(sheets_cache.tests_rows or [])
+        rows = list(sheets_cache.base_tests_rows)
         teacher_id = resolve_teacher_id(user)
         # Убранное преподавателем прячется и в общем наборе: скрытие
         # хранится по нему, чужих учеников оно не касается
@@ -175,7 +175,7 @@ async def get_tests(telegram_id: int) -> ContentBundle:
         # Своих вопросов нет. При политике «а пока — общие» отдаём базовый
         # набор предмета: тренажёр работает сразу, а не после первой загрузки.
         if allow_base:
-            base_rows = list(sheets_cache.tests_rows or [])
+            base_rows = list(sheets_cache.base_tests_rows)
             if base_rows:
                 base_rows = await _drop_reported(base_rows, user, teacher_id)
                 return ContentBundle(
@@ -193,7 +193,7 @@ async def get_tests(telegram_id: int) -> ContentBundle:
             source=source, subject=subject, teacher_id=teacher_id, empty_reason=reason
         )
 
-    rows = list(sheets_cache.tests_rows or [])
+    rows = list(sheets_cache.base_tests_rows)
     return ContentBundle(
         rows=rows,
         source=subjects_cfg.SOURCE_BASE,

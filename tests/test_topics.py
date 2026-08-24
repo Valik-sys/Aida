@@ -669,6 +669,114 @@ class TestBackFromQuantity:
         assert "Назад" in last.text
 
 
+class TestBaseMerge:
+    """Общие вопросы из двух листов складываются в один набор.
+
+    Обычные вопросы размечены разделами, отдельный лист «Вопросы по темам» —
+    темами. Второй ученику не показывался вовсе. Склейка кладёт тему в то же
+    поле «Раздел», поэтому темы у общих вопросов появляются без отдельной
+    ветки в коде.
+    """
+
+    def _topic_row(self, **over):
+        row = {
+            "Раздел_№": "6", "Тема_код": "6_1", "Тема_название": "Тема",
+            "Часть": "А", "№": "1", "Вопрос": "Кто?",
+            "Вар1": "а", "Вар2": "б", "Вар3": "", "Вар4": "", "Вар5": "",
+            "Ответ": "2",
+        }
+        row.update(over)
+        return row
+
+    def test_columns_are_renamed_to_the_row_schema(self):
+        from services.sheets import topic_rows_as_tests
+
+        row = topic_rows_as_tests([self._topic_row()])[0]
+
+        assert row["Раздел"] == "6_1"
+        assert row["Вар.1"] == "а"
+        assert row["Вар.2"] == "б"
+        assert row["Вопрос"] == "Кто?"
+        assert row["Ответ"] == "2"
+
+    def test_schema_matches_the_ordinary_rows(self):
+        """Схема строки — общая для всего бота, лишних и недостающих полей быть не должно."""
+        from services.sheets import topic_rows_as_tests
+
+        row = topic_rows_as_tests([self._topic_row()])[0]
+        expected = {
+            "Вариант", "Часть", "№", "Вопрос",
+            "Вар.1", "Вар.2", "Вар.3", "Вар.4", "Вар.5", "Ответ", "Раздел",
+        }
+        assert set(row) == expected
+
+    def test_questions_without_a_topic_are_dropped(self):
+        from services.sheets import topic_rows_as_tests
+
+        assert topic_rows_as_tests([self._topic_row(Тема_код="")]) == []
+
+    def test_questions_without_an_answer_are_dropped(self):
+        """Тот же фильтр качества, что у билетов: без ответа проверять нечем."""
+        from services.sheets import topic_rows_as_tests
+
+        assert topic_rows_as_tests([self._topic_row(Ответ="  ")]) == []
+        assert topic_rows_as_tests([self._topic_row(Вопрос="")]) == []
+
+    def test_duplicates_of_the_ordinary_set_are_dropped(self):
+        from services.sheets import topic_rows_as_tests
+
+        known = [{"Вопрос": "  кто?  "}]
+        assert topic_rows_as_tests([self._topic_row()], known) == []
+
+    def test_repeats_inside_the_topic_set_are_dropped(self):
+        from services.sheets import topic_rows_as_tests
+
+        pair = [self._topic_row(), self._topic_row(Тема_код="6_2")]
+        assert len(topic_rows_as_tests(pair)) == 1
+
+    def test_part_letter_typo_is_normalised(self):
+        """«Б» вместо «В» — опечатка разметки, часть в билете одна и та же."""
+        from services.sheets import topic_rows_as_tests
+
+        assert topic_rows_as_tests([self._topic_row(Часть="Б")])[0]["Часть"] == "В"
+
+    def test_topic_questions_have_no_ticket_variant(self):
+        """Эти вопросы не из билета — в тренировке по варианту им делать нечего."""
+        from services.sheets import topic_rows_as_tests
+
+        assert topic_rows_as_tests([self._topic_row()])[0]["Вариант"] == ""
+
+    def test_combined_set_is_recomputed_when_rows_change(self):
+        """Иначе подменённый набор молча отдавал бы прежние вопросы."""
+        from services.sheets import SheetsCache
+
+        cache = SheetsCache(
+            tests_rows=[], topic_tests_rows=[self._topic_row()],
+            flash_dates=[], flash_concepts=[], flash_persons=[],
+        )
+        assert len(cache.base_tests_rows) == 1
+
+        cache.topic_tests_rows = [self._topic_row(), self._topic_row(Вопрос="Где?")]
+        assert len(cache.base_tests_rows) == 2
+
+    def test_real_snapshot_gains_topics(self):
+        """На настоящем снимке: темы появляются, вопросы не теряются."""
+        from services.sheets import sheets_cache
+
+        if not sheets_cache.load_from_disk():
+            pytest.skip("нет снимка общего контента")
+
+        rows = sheets_cache.base_tests_rows
+        with_topics = [r for r in rows if sections_lib.is_topic(str(r.get("Раздел")))]
+
+        assert len(rows) > len(sheets_cache.tests_rows)
+        assert with_topics
+        # Каждая тема из данных известна сетке — иначе вопросы безымянные
+        for row in with_topics:
+            key = str(row["Раздел"])
+            assert sections_lib.is_valid(SUBJECT, key), key
+
+
 class TestMatching:
     """Отбор вопросов по выбранному месту."""
 

@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import gspread
@@ -37,6 +37,75 @@ def _open_worksheet(ss: gspread.Spreadsheet, title: str) -> gspread.Worksheet:
         return ss.sheet1
 
 
+# ---------- Вопросы по темам как часть общего набора ----------
+#
+# Общий контент приехал из двух листов таблицы: обычные вопросы размечены
+# разделами, а отдельный лист «Вопросы по темам» — темами. Наборы почти
+# не пересекаются, и второй ученику не показывался вовсе: его читал только
+# режим «По темам».
+#
+# Поэтому при загрузке они складываются в один набор. Разметка тем при этом
+# попадает в то же поле «Раздел», что и у преподавателя, — темы у общих
+# вопросов появляются сами собой, отдельной ветки в коде не нужно.
+#
+# Изоляции это не касается: чей контент показать — по-прежнему решает
+# services/content_provider.py, и вопросы преподавателя с общими не мешаются.
+
+_TOPIC_COLUMNS = {
+    "Часть": "Часть",
+    "№": "№",
+    "Вопрос": "Вопрос",
+    "Ответ": "Ответ",
+}
+
+
+def _fingerprint(question: str) -> str:
+    return " ".join((question or "").split()).casefold()[:120]
+
+
+def topic_rows_as_tests(
+    topic_rows: List[Dict[str, str]],
+    known: Optional[List[Dict[str, str]]] = None,
+) -> List[Dict[str, str]]:
+    """Приводит вопросы по темам к схеме строки тренажёра.
+
+    Отличий три: тема лежит в «Тема_код», варианты названы «Вар1» вместо
+    «Вар.1», а поля «Вариант» нет вовсе — эти вопросы не из билета, и в
+    тренировке по варианту им делать нечего.
+
+    Вопросы без темы, без текста или без ответа пропускаем: тот же фильтр
+    качества, что и у билетов преподавателя. Совпадающие с обычным набором
+    тоже — иначе один и тот же вопрос встретится ученику дважды.
+    """
+    seen = {_fingerprint(str(r.get("Вопрос") or "")) for r in (known or [])}
+    seen.discard("")
+
+    out: List[Dict[str, str]] = []
+    for row in topic_rows or []:
+        topic = str(row.get("Тема_код") or "").strip()
+        question = str(row.get("Вопрос") or "").strip()
+        answer = str(row.get("Ответ") or "").strip()
+        if not topic or not question or not answer:
+            continue
+
+        mark = _fingerprint(question)
+        if mark in seen:
+            continue
+        seen.add(mark)
+
+        converted = {name: str(row.get(src) or "").strip() for src, name in _TOPIC_COLUMNS.items()}
+        # «Б» вместо «В» — опечатка разметки: часть в билете одна и та же
+        if converted.get("Часть") == "Б":
+            converted["Часть"] = "В"
+        for i in range(1, 6):
+            converted[f"Вар.{i}"] = str(row.get(f"Вар{i}") or "").strip()
+        converted["Вариант"] = ""
+        converted["Раздел"] = topic
+        out.append(converted)
+
+    return out
+
+
 @dataclass
 class SheetsCache:
     tests_rows: List[Dict[str, str]]
@@ -45,6 +114,31 @@ class SheetsCache:
     flash_concepts: List[Dict[str, str]]
     flash_persons: List[Dict[str, str]]
     loaded_at: Optional[float] = None
+    _combined: Optional[List[Dict[str, str]]] = field(default=None, repr=False)
+    _combined_from: Optional[tuple] = field(default=None, repr=False)
+
+    @property
+    def base_tests_rows(self) -> List[Dict[str, str]]:
+        """Весь общий набор вопросов: обычные плюс размеченные темами.
+
+        Единственное, что должен читать общий слой тренировки. Прямое чтение
+        `tests_rows` отдаёт половину набора и теряет темы.
+
+        Склейка считается один раз на набор: она меняется только при `/update`,
+        а к этому свойству обращаются на каждое нажатие кнопки. Готовое
+        отдаётся, только если исходные наборы те же самые — иначе подменённый
+        набор молча отдавал бы прежние вопросы.
+        """
+        signature = (
+            id(self.tests_rows), len(self.tests_rows or []),
+            id(self.topic_tests_rows), len(self.topic_tests_rows or []),
+        )
+        if self._combined is None or self._combined_from != signature:
+            self._combined = list(self.tests_rows or []) + topic_rows_as_tests(
+                self.topic_tests_rows, self.tests_rows
+            )
+            self._combined_from = signature
+        return self._combined
 
     async def load_all(self) -> None:
         def _load_sync() -> Dict[str, Any]:
@@ -116,6 +210,7 @@ class SheetsCache:
         loaded = await asyncio.to_thread(_load_sync)
         self.tests_rows = loaded["tests_rows"]
         self.topic_tests_rows = loaded["topic_tests_rows"]
+        self._combined = None
         self.flash_dates = loaded["flash_dates"]
         self.flash_concepts = loaded["flash_concepts"]
         self.flash_persons = loaded["flash_persons"]
@@ -154,6 +249,7 @@ class SheetsCache:
             data = json.loads(_CACHE_PATH.read_text(encoding="utf-8"))
             self.tests_rows = data.get("tests_rows", [])
             self.topic_tests_rows = data.get("topic_tests_rows", [])
+            self._combined = None
             self.flash_dates = data.get("flash_dates", [])
             self.flash_concepts = data.get("flash_concepts", [])
             self.flash_persons = data.get("flash_persons", [])
