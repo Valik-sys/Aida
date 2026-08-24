@@ -22,6 +22,7 @@ from bot.keyboards.inline import (
     question_report_kb,
     report_reasons_kb,
     reported_open_kb,
+    section_whole_kb,
     sections_kb,
     student_topics_kb,
     short_text,
@@ -1084,15 +1085,48 @@ async def by_part_b(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(lambda c: c.data == "tests:ticket")  # type: ignore[call-arg]
 async def random_ticket(callback: CallbackQuery, state: FSMContext) -> None:
-    """Генерирует случайный билет: TICKET_PART_A вопросов части А + TICKET_PART_B части Б."""
+    """Полный билет по всем материалам ученика."""
+    await _deal_ticket(callback, state)
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("tests:secticket:"))  # type: ignore[call-arg]
+async def section_ticket(callback: CallbackQuery, state: FSMContext) -> None:
+    """Полный билет по одному разделу.
+
+    Тот же билет, что в главном меню, только вопросы берутся из раздела:
+    после разбора темы на занятии имеет смысл прогнать не пять вопросов,
+    а целый билет — но по этому разделу, а не по всему курсу.
+    """
+    key = (callback.data or "").split(":")[-1].strip()
+    if not key:
+        await callback.answer()
+        return
+    await _deal_ticket(callback, state, section=key)
+
+
+async def _deal_ticket(
+    callback: CallbackQuery,
+    state: FSMContext,
+    section: Optional[str] = None,
+) -> None:
+    """Собирает билет: TICKET_PART_A вопросов части А + TICKET_PART_B части Б.
+
+    `section` — собрать только из этого раздела или темы. Отбор тот же, что
+    в тренировке по разделу, поэтому раздел вбирает и свои темы.
+    """
     bundle = await content_provider.get_tests(callback.from_user.id)
     if not bundle:
         await callback.message.edit_text(bundle.empty_reason or "Тесты временно недоступны.")
         await callback.answer()
         return
 
+    rows = bundle.rows
+    if section:
+        key = "" if section == UNSORTED_KEY else section
+        rows = [r for r in rows if _match_section(r.get("Раздел", ""), key)]
+
     all_questions: List[Dict[str, Any]] = []
-    for row in bundle.rows:
+    for row in rows:
         question_text = row.get("Вопрос") or ""
         expected_raw = (row.get("Ответ") or "").strip()
         options = {i: _get_row_variant(row, i) for i in range(1, 6)}
@@ -1143,8 +1177,14 @@ async def random_ticket(callback: CallbackQuery, state: FSMContext) -> None:
         "teacher_id": bundle.teacher_id, "subject": bundle.subject,
     })
     note = f"{FALLBACK_NOTE}\n\n" if bundle.fallback else ""
+    # В билете по разделу вопросов может не хватить на полный: обещать
+    # 38 и молча выдать 12 нельзя, поэтому счёт частей показывается всегда
+    head = "🎯 Полный билет"
+    if section:
+        where = sections_lib.title_of(bundle.subject, section)
+        head = f"🎯 Билет: {UNSORTED_LABEL if section == UNSORTED_KEY else where}"
     await callback.message.edit_text(
-        f"{note}🎯 Полный билет\n"
+        f"{note}{head}\n"
         f"Часть А: {actual_a} · часть Б: {actual_b} · всего: {len(ticket)}\n\n"
         "Поехали!"
     )
@@ -1252,7 +1292,10 @@ async def pick_section_whole(callback: CallbackQuery, state: FSMContext) -> None
         await callback.answer()
         return
     await state.update_data(test_filter_type="section", test_filter_value=key, test_qty=None)
-    await callback.message.edit_text("Сколько вопросов нужно?", reply_markup=quantity_kb())
+    await callback.message.edit_text(
+        "Как тренируемся по этому разделу?",
+        reply_markup=section_whole_kb(key, TICKET_PART_A + TICKET_PART_B),
+    )
     await callback.answer()
 
 

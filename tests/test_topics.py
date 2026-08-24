@@ -324,6 +324,7 @@ class _Stub:
             self.data = data
             self.from_user = _Stub.User(uid)
             self.message = _Stub.Message(uid=uid)
+            self.bot = None
 
         async def answer(self, *a, **kw):
             return None
@@ -667,6 +668,130 @@ class TestBackFromQuantity:
         last = quantity_kb().inline_keyboard[-1][0]
         assert last.callback_data == "tests:qty_back"
         assert "Назад" in last.text
+
+
+class TestSectionTicket:
+    """Целый билет по одному разделу.
+
+    То же, что «полный билет» в главном меню, но вопросы берутся из раздела:
+    после разбора темы на занятии осмысленно прогнать билет по этому разделу,
+    а не по всему курсу.
+    """
+
+    class _Bundle:
+        def __init__(self, rows):
+            self.rows = rows
+            self.teacher_id = None
+            self.subject = SUBJECT
+            self.empty_reason = ""
+            self.fallback = False
+
+        def __bool__(self):
+            return bool(self.rows)
+
+    def _rows(self, section, count, with_options=True):
+        out = []
+        for i in range(count):
+            row = {
+                "Раздел": section, "Вариант": "", "Часть": "А" if with_options else "В",
+                "№": str(i), "Вопрос": f"Вопрос {section} {i}?", "Ответ": "2",
+            }
+            for n in range(1, 6):
+                row[f"Вар.{n}"] = f"вариант {n}" if with_options and n <= 4 else ""
+            out.append(row)
+        return out
+
+    @pytest.fixture
+    def screen(self, monkeypatch):
+        from aiogram.fsm.context import FSMContext
+        from aiogram.fsm.storage.base import StorageKey
+        from aiogram.fsm.storage.memory import MemoryStorage
+
+        import bot.handlers.tests as th
+
+        rows = (
+            self._rows("6_1", 30) + self._rows("6_8", 30, with_options=False)
+            + self._rows("5", 40) + self._rows("5", 40, with_options=False)
+        )
+        bundle = self._Bundle(rows)
+        captured = {}
+
+        async def fake_get_tests(_user_id):
+            return bundle
+
+        async def fake_send_question(*a, **kw):
+            return None
+
+        monkeypatch.setattr(th.content_provider, "get_tests", fake_get_tests)
+        monkeypatch.setattr(th, "_send_question", fake_send_question)
+        _Stub.clear()
+        return th, FSMContext(
+            storage=MemoryStorage(), key=StorageKey(1, STUDENT, STUDENT)
+        ), captured
+
+    async def test_whole_section_screen_offers_a_ticket(self, screen):
+        th, state, _ = screen
+
+        await th.pick_section_whole(_Stub.Callback("tests:secall:6", uid=STUDENT), state)
+
+        buttons = [b for row in _Stub.keyboards[-1].inline_keyboard for b in row]
+        ticket = [b for b in buttons if b.callback_data == "tests:secticket:6"]
+        assert ticket, "кнопки билета по разделу нет"
+        assert "38" in ticket[0].text
+        # Выбор количества никуда не делся
+        assert any(b.callback_data == "tests:qty:10" for b in buttons)
+
+    async def test_ticket_is_built_from_that_section_only(self, screen):
+        """Вопросы соседнего раздела в билет попасть не должны."""
+        th, state, _ = screen
+
+        await th.section_ticket(_Stub.Callback("tests:secticket:6", uid=STUDENT), state)
+        session = (await state.get_data()).get("test_session") or {}
+        assert session.get("questions")
+        for q in session["questions"]:
+            assert " 6_" in q["question_text"], q["question_text"]
+
+    async def test_section_takes_in_its_topics(self, screen):
+        """Раздел 6 разложен по темам — билет должен собраться из них."""
+        th, state, _ = screen
+
+        await th.section_ticket(_Stub.Callback("tests:secticket:6", uid=STUDENT), state)
+        session = (await state.get_data()).get("test_session") or {}
+
+        kinds = {q["type"] for q in session["questions"]}
+        assert kinds == {"A", "B"}
+
+    async def test_ticket_keeps_the_ticket_shape(self, screen):
+        """16 вопросов части А и 22 части Б — как в полном билете."""
+        th, state, _ = screen
+
+        await th.section_ticket(_Stub.Callback("tests:secticket:5", uid=STUDENT), state)
+        session = (await state.get_data()).get("test_session") or {}
+        questions = session["questions"]
+
+        assert len([q for q in questions if q["type"] == "A"]) == th.TICKET_PART_A
+        assert len([q for q in questions if q["type"] == "B"]) == th.TICKET_PART_B
+
+    async def test_short_section_says_how_many_there_are(self, screen):
+        """Обещать 38 и молча выдать 16 нельзя.
+
+        В теме 6_1 только вопросы части А, части Б там нет вовсе — билет
+        выйдет короче, и на экране должно стоять настоящее число.
+        """
+        th, state, _ = screen
+
+        await th.section_ticket(_Stub.Callback("tests:secticket:6_1", uid=STUDENT), state)
+        session = (await state.get_data()).get("test_session") or {}
+
+        assert len(session["questions"]) == th.TICKET_PART_A
+        assert any(f"всего: {th.TICKET_PART_A}" in text for text in _Stub.log)
+
+    async def test_section_name_is_shown(self, screen):
+        th, state, _ = screen
+
+        await th.section_ticket(_Stub.Callback("tests:secticket:6", uid=STUDENT), state)
+
+        assert any("Билет:" in text and "1917" in text for text in _Stub.log)
 
 
 class TestBaseMerge:

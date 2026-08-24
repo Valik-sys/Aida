@@ -465,6 +465,32 @@ def student_topics_kb(topics: Sequence, section_key: str) -> InlineKeyboardMarku
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def section_whole_kb(section_key: str, ticket_size: int) -> InlineKeyboardMarkup:
+    """Что делать с целым разделом: билет или своё количество вопросов.
+
+    Билет стоит первым: после разбора темы на занятии смысл прогнать целый
+    билет по разделу больше, чем пять случайных вопросов. Кнопки количества
+    те же, что на обычном экране, — состояние уже выставлено на этот раздел.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(
+                text=f"🎯 Билет по разделу · {ticket_size} вопросов",
+                callback_data=f"tests:secticket:{section_key}",
+            )],
+            [
+                InlineKeyboardButton(text="5", callback_data="tests:qty:5"),
+                InlineKeyboardButton(text="10", callback_data="tests:qty:10"),
+            ],
+            [
+                InlineKeyboardButton(text="20", callback_data="tests:qty:20"),
+                InlineKeyboardButton(text="все", callback_data="tests:qty:all"),
+            ],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="tests:qty_back")],
+        ]
+    )
+
+
 def variants_kb(variant_labels: Sequence[str]) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = []
     for idx, label in enumerate(variant_labels):
