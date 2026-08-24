@@ -484,7 +484,9 @@ def quantity_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="20", callback_data="tests:qty:20"),
                 InlineKeyboardButton(text="все", callback_data="tests:qty:all"),
             ],
-            [InlineKeyboardButton(text=MENU_BTN_HOME, callback_data="menu:back_to_main")],
+            # Назад, а не в меню: ошибиться разделом или темой проще всего
+            # на предыдущем шаге, и выкидывать за это в самое начало незачем.
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="tests:qty_back")],
         ]
     )
 

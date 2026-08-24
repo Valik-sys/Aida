@@ -570,6 +570,105 @@ class TestOneScreen:
         assert _Stub.edited == []
 
 
+class TestBackFromQuantity:
+    """Кнопка «Назад» на экране количества.
+
+    Раньше там было «Меню»: ошибившись разделом, ученик улетал в самое начало
+    и заходил заново. Назад должно вести на шаг назад — а какой это шаг,
+    зависит от того, как сюда пришли.
+    """
+
+    class _Bundle:
+        def __init__(self, rows):
+            self.rows = rows
+            self.teacher_id = None
+            self.subject = SUBJECT
+            self.empty_reason = ""
+            self.fallback = False
+
+        def __bool__(self):
+            return bool(self.rows)
+
+    @pytest.fixture
+    def screen(self, monkeypatch):
+        """Хендлеры тестов с подменённым набором вопросов ученика."""
+        from aiogram.fsm.context import FSMContext
+        from aiogram.fsm.storage.base import StorageKey
+        from aiogram.fsm.storage.memory import MemoryStorage
+
+        import bot.handlers.tests as th
+
+        rows = [
+            {"Раздел": "6_1", "Вопрос": "1", "Вариант": "в1"},
+            {"Раздел": "6_8", "Вопрос": "2", "Вариант": "в1"},
+            {"Раздел": "5", "Вопрос": "3", "Вариант": "в2"},
+        ]
+        bundle = self._Bundle(rows)
+
+        async def fake_get_tests(_user_id):
+            return bundle
+
+        monkeypatch.setattr(th.content_provider, "get_tests", fake_get_tests)
+        _Stub.clear()
+        return th, FSMContext(
+            storage=MemoryStorage(), key=StorageKey(1, STUDENT, STUDENT)
+        )
+
+    async def test_from_topic_back_to_topics(self, screen):
+        th, state = screen
+
+        await th.pick_section(_Stub.Callback("tests:section:6_1", uid=STUDENT), state)
+        _Stub.clear()
+        await th.qty_back(_Stub.Callback("tests:qty_back", uid=STUDENT), state)
+
+        assert any("Выбери тему" in text for text in _Stub.log)
+
+    async def test_from_whole_section_back_to_topics(self, screen):
+        """«Весь раздел целиком» тоже пришёл со списка тем."""
+        th, state = screen
+
+        await th.pick_section_whole(_Stub.Callback("tests:secall:6", uid=STUDENT), state)
+        _Stub.clear()
+        await th.qty_back(_Stub.Callback("tests:qty_back", uid=STUDENT), state)
+
+        assert any("Выбери тему" in text for text in _Stub.log)
+
+    async def test_from_section_without_topics_back_to_sections(self, screen):
+        th, state = screen
+
+        await th.pick_section(_Stub.Callback("tests:section:5", uid=STUDENT), state)
+        _Stub.clear()
+        await th.qty_back(_Stub.Callback("tests:qty_back", uid=STUDENT), state)
+
+        assert any("Выбери раздел" in text for text in _Stub.log)
+
+    async def test_from_part_b_back_to_the_root(self, screen):
+        th, state = screen
+
+        await th.by_part_b(_Stub.Callback("tests:part_b", uid=STUDENT), state)
+        _Stub.clear()
+        await th.qty_back(_Stub.Callback("tests:qty_back", uid=STUDENT), state)
+
+        assert any("Тесты" in text for text in _Stub.log)
+
+    async def test_back_never_lands_in_the_main_menu(self, screen):
+        """Главное меню — это не «назад», а выход из режима."""
+        th, state = screen
+
+        for data in ("tests:section:6_1", "tests:section:5"):
+            await th.pick_section(_Stub.Callback(data, uid=STUDENT), state)
+            _Stub.clear()
+            await th.qty_back(_Stub.Callback("tests:qty_back", uid=STUDENT), state)
+            assert not any("Главное меню" in text for text in _Stub.log)
+
+    def test_quantity_screen_offers_back_not_menu(self):
+        from bot.keyboards.inline import quantity_kb
+
+        last = quantity_kb().inline_keyboard[-1][0]
+        assert last.callback_data == "tests:qty_back"
+        assert "Назад" in last.text
+
+
 class TestMatching:
     """Отбор вопросов по выбранному месту."""
 

@@ -1179,6 +1179,14 @@ def _available_topics(bundle, section: str) -> List[Tuple[str, str, int]]:
     return out
 
 
+async def _show_topics(callback: CallbackQuery, bundle, section: str, topics) -> None:
+    """Экран выбора темы внутри раздела."""
+    await callback.message.edit_text(
+        f"{sections_lib.title_of(bundle.subject, section)}\n\nВыбери тему:",
+        reply_markup=student_topics_kb(topics, section),
+    )
+
+
 @router.callback_query(lambda c: c.data and c.data.startswith("tests:section:"))  # type: ignore[call-arg]
 async def pick_section(callback: CallbackQuery, state: FSMContext) -> None:
     key = (callback.data or "").split(":")[-1].strip()
@@ -1192,15 +1200,47 @@ async def pick_section(callback: CallbackQuery, state: FSMContext) -> None:
         bundle = await content_provider.get_tests(callback.from_user.id)
         topics = _available_topics(bundle, key)
         if topics:
-            await callback.message.edit_text(
-                f"{sections_lib.title_of(bundle.subject, key)}\n\nВыбери тему:",
-                reply_markup=student_topics_kb(topics, key),
-            )
+            await _show_topics(callback, bundle, key, topics)
             await callback.answer()
             return
 
     await state.update_data(test_filter_type="section", test_filter_value=key, test_qty=None)
     await callback.message.edit_text("Сколько вопросов нужно?", reply_markup=quantity_kb())
+    await callback.answer()
+
+
+@router.callback_query(lambda c: c.data == "tests:qty_back")  # type: ignore[call-arg]
+async def qty_back(callback: CallbackQuery, state: FSMContext) -> None:
+    """Шаг назад с экрана количества — туда, откуда на него пришли.
+
+    Куда именно, видно по уже выбранному фильтру: раздел, тема или вариант.
+    Отдельно запоминать путь не нужно, а если бы запоминали — он бы разъехался
+    с настоящим при первом же новом входе на этот экран.
+    """
+    data = await state.get_data()
+    filter_type = data.get("test_filter_type")
+    value = str(data.get("test_filter_value") or "")
+
+    if filter_type == "variant":
+        await by_variant(callback, state)
+        return
+
+    if filter_type == "section" and value:
+        if value != UNSORTED_KEY:
+            bundle = await content_provider.get_tests(callback.from_user.id)
+            section = sections_lib.section_of(value)
+            topics = _available_topics(bundle, section)
+            # Темы есть — значит через их список мы сюда и попали
+            if topics:
+                await _show_topics(callback, bundle, section, topics)
+                await callback.answer()
+                return
+        await by_section(callback, state)
+        return
+
+    # Часть Б и всё прочее приходят прямо из корня «Тренировки»
+    await state.update_data(test_filter_type=None, test_filter_value=None, test_qty=None)
+    await callback.message.edit_text("Режим: Тесты", reply_markup=tests_root_kb())
     await callback.answer()
 
 
