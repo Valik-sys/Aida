@@ -73,6 +73,27 @@ NEW_TOPIC_PROMPT = (
 )
 
 
+async def _show(message: Message, text: str, reply_markup=None) -> None:
+    """Показывает шаг мастера, заменяя предыдущий, а не добавляя новый.
+
+    Мастер — это один экран, который меняется: раздел, тема, итог. Отдельным
+    сообщением на каждый шаг чат превращается в ленту, где до нужного места
+    надо листать, а старые клавиатуры остаются живыми и по ним нажимают.
+
+    Заменить можно только своё сообщение с текстом: когда шаг пришёл ответом
+    на файл или на введённое название, редактировать нечего — тогда отправляем
+    новое, и заменяться будет уже оно.
+    """
+    try:
+        await message.edit_text(text, reply_markup=reply_markup)
+        return
+    except Exception as exc:  # noqa: BLE001
+        # Тот же текст Telegram считает ошибкой; отправлять дубль не за чем
+        if "not modified" in str(exc).lower():
+            return
+    await message.answer(text, reply_markup=reply_markup)
+
+
 async def _teacher_subject(telegram_id: int) -> str | None:
     """Предмет преподавателя или None, если пользователь не преподаватель."""
     user = await get_user(telegram_id)
@@ -191,7 +212,7 @@ def _format_report(
     else:
         lines.append(f"✅ Файл «{last.filename}» разобран: принято {last.accepted} из {last.found}.")
         if section_label:
-            lines.append(f"Раздел: {section_label}")
+            lines.append(f"Куда: {section_label}")
         if last.rejected:
             reasons = "\n".join(f"  • {r} — {n}" for r, n in last.reasons.items())
             lines.append(f"\nНе принято {last.rejected}:\n{reasons}")
@@ -283,7 +304,7 @@ async def handle_document(message: Message, state: FSMContext) -> None:
             await _ask_section(message, state, subject, result, target.name)
         else:
             label = (
-                _section_label(telegram_id, subject, session_section)
+                _place_label(telegram_id, subject, session_section)
                 if session_section else None
             )
             report = _format_report(result, target.name, label)
@@ -350,8 +371,17 @@ async def _ask_section(
     )
 
 
-async def _next_unsorted(message: Message, state: FSMContext, subject: str) -> bool:
+async def _next_unsorted(
+    message: Message,
+    state: FSMContext,
+    subject: str,
+    note: str = "",
+) -> bool:
     """Показывает следующий файл без раздела. False — раскладывать больше нечего.
+
+    `note` — что случилось с предыдущим файлом. Он показывается здесь же,
+    а не отдельным сообщением: иначе раскладка десяти файлов оставляет
+    в чате двадцать сообщений, из которых девятнадцать уже не нужны.
 
     Пропущенные файлы запоминаются на время разбора: без этого «Пропустить»
     возвращало бы тот же файл по кругу — раздел-то у него так и не появился.
@@ -384,9 +414,11 @@ async def _next_unsorted(message: Message, state: FSMContext, subject: str) -> b
     await state.update_data(sec_flow=FLOW_SORT, sec_target=filename)
 
     left = f"Осталось файлов: {len(pending)}\n\n" if len(pending) > 1 else ""
-    await message.answer(
+    head = f"{note}\n\n" if note else ""
+    await _show(
+        message,
         f"🗂 Разложить по разделам\n\n"
-        f"{left}«{filename}» — {accepted} {questions_word(accepted)}\n"
+        f"{head}{left}«{filename}» — {accepted} {questions_word(accepted)}\n"
         f"В какой раздел?",
         reply_markup=sections_kb_for_upload(_all_sections(telegram_id, subject)),
     )
@@ -403,7 +435,7 @@ async def sort_entry(callback: CallbackQuery, state: FSMContext) -> None:
     # Новый заход — пропущенные в прошлый раз файлы снова в очереди
     await state.update_data(sec_skipped=None)
     if not await _next_unsorted(callback.message, state, subject):
-        await callback.message.answer("Все файлы уже разложены.")
+        await _show(callback.message, "Все файлы уже разложены.")
 
 
 @router.callback_query(lambda c: (c.data or "").startswith(f"{SEC_PREFIX}:"))
@@ -429,14 +461,15 @@ async def section_chosen(callback: CallbackQuery, state: FSMContext) -> None:
                 teacher_content.find_file_by_token, telegram_id, subject, parts[1]
             )
             if not named:
-                await callback.message.answer("Этого файла больше нет.")
+                await _show(callback.message, "Этого файла больше нет.")
                 return
             target = named
             flow = FLOW_FILE
             await state.update_data(sec_flow=flow, sec_target=target)
 
         await state.set_state(TeacherUpload.waiting_section)
-        await callback.message.answer(
+        await _show(
+            callback.message,
             f"«{target}» — в какой раздел?" if target else PICK_SECTION_PROMPT,
             reply_markup=sections_kb_for_upload(
                 _all_sections(telegram_id, subject),
@@ -447,7 +480,7 @@ async def section_chosen(callback: CallbackQuery, state: FSMContext) -> None:
 
     if action == "new":
         await state.set_state(TeacherUpload.waiting_section_title)
-        await callback.message.answer(NEW_SECTION_PROMPT)
+        await _show(callback.message, NEW_SECTION_PROMPT)
         return
 
     # «Смешанные вопросы» при разборе старых загрузок: раздела у файла и так
@@ -458,17 +491,19 @@ async def section_chosen(callback: CallbackQuery, state: FSMContext) -> None:
         if target:
             skipped.append(target)
         await state.update_data(sec_skipped=skipped)
-        await callback.message.answer(f"«{target}» → {UNSORTED_LABEL}")
-        if not await _next_unsorted(callback.message, state, subject):
-            await callback.message.answer(
-                "Готово, все файлы разложены.", reply_markup=uploaded_kb()
+        note = f"«{target}» → {UNSORTED_LABEL}"
+        if not await _next_unsorted(callback.message, state, subject, note=note):
+            await _show(
+                callback.message,
+                f"{note}\n\nГотово, все файлы разложены.",
+                reply_markup=uploaded_kb(),
             )
         return
 
     key = "" if action == UNSORTED_KEY else action
     custom = teacher_content.custom_sections(telegram_id, subject)
     if not sections_lib.is_valid(subject, key, custom):
-        await callback.message.answer("Такого раздела нет. Выберите из списка.")
+        await _show(callback.message, "Такого раздела нет. Выберите из списка.")
         return
 
     # У «Смешанных вопросов» темы нет по определению: там вопросы разных
@@ -491,7 +526,8 @@ async def _stale_click(message: Message, flow: str, target: str | None) -> bool:
     """
     if flow == FLOW_START or target:
         return False
-    await message.answer(
+    await _show(
+        message,
         "Этот файл уже разложен.\n"
         "Следующий можно прислать прямо в чат.",
         reply_markup=uploaded_kb(),
@@ -520,8 +556,10 @@ async def _ask_topic(
     await state.set_state(TeacherUpload.waiting_topic)
     await state.update_data(sec_flow=flow, sec_target=target, sec_section=section)
 
-    await message.answer(
-        f"Раздел: {label}\n\nТеперь тема.",
+    head = f"«{target}»\n\n" if target and flow != FLOW_START else ""
+    await _show(
+        message,
+        f"{head}Раздел: {label}\n\nТеперь тема.",
         reply_markup=topics_kb_for_upload(topics),
     )
 
@@ -542,7 +580,8 @@ async def topic_chosen(callback: CallbackQuery, state: FSMContext) -> None:
 
     if action == "back":
         await state.set_state(TeacherUpload.waiting_section)
-        await callback.message.answer(
+        await _show(
+            callback.message,
             f"«{target}» — в какой раздел?" if target else PICK_SECTION_PROMPT,
             reply_markup=sections_kb_for_upload(_all_sections(telegram_id, subject)),
         )
@@ -550,7 +589,7 @@ async def topic_chosen(callback: CallbackQuery, state: FSMContext) -> None:
 
     if action == "new":
         await state.set_state(TeacherUpload.waiting_topic_title)
-        await callback.message.answer(NEW_TOPIC_PROMPT)
+        await _show(callback.message, NEW_TOPIC_PROMPT)
         return
 
     # «Весь раздел» — файл ложится в раздел без темы. Так и должно быть
@@ -562,7 +601,7 @@ async def topic_chosen(callback: CallbackQuery, state: FSMContext) -> None:
     custom_topics = teacher_content.custom_topics(telegram_id, subject)
     custom = teacher_content.custom_sections(telegram_id, subject)
     if not sections_lib.is_valid(subject, action, custom, custom_topics):
-        await callback.message.answer("Такой темы нет. Выберите из списка.")
+        await _show(callback.message, "Такой темы нет. Выберите из списка.")
         return
 
     await _apply_place(callback.message, state, subject, flow, target, action)
@@ -635,9 +674,10 @@ async def _apply_place(
         await state.update_data(
             section=key, sec_flow=None, sec_target=None, sec_section=None
         )
-        await message.answer(
-            f"Раздел: {label}\n\n"
-            "Пришлите файл .docx — всё, что в нём найдётся, попадёт в этот раздел.\n"
+        await _show(
+            message,
+            f"Куда: {label}\n\n"
+            "Пришлите файл .docx — всё, что в нём найдётся, попадёт сюда.\n"
             "Можно прислать несколько файлов подряд."
         )
         return
@@ -648,10 +688,11 @@ async def _apply_place(
         )
 
     if flow == FLOW_SORT:
-        await message.answer(f"«{target}» → {label}")
-        if not await _next_unsorted(message, state, subject):
-            await message.answer(
-                "Готово, все файлы разложены.",
+        note = f"«{target}» → {label}"
+        if not await _next_unsorted(message, state, subject, note=note):
+            await _show(
+                message,
+                f"{note}\n\nГотово, все файлы разложены.",
                 reply_markup=uploaded_kb(),
             )
         return
@@ -665,7 +706,8 @@ async def _apply_place(
         if key
         else f"Ученик найдёт их в тренировке по разделам, в «{UNSORTED_LABEL}»."
     )
-    await message.answer(
+    await _show(
+        message,
         f"Готово: «{target}» → {label}\n\n{tail}",
         reply_markup=uploaded_kb(label, teacher_content.file_token(target)),
     )

@@ -293,13 +293,29 @@ class _Stub:
             self.id = uid
 
     class Message:
-        def __init__(self, text=None, uid=TEACHER):
+        """Сообщение бота: можно заменить, если оно своё и с текстом.
+
+        Сообщение пользователя редактировать нельзя — как и в Telegram,
+        поэтому `edit_text` у него срывается, и мастер шлёт новое.
+        """
+
+        def __init__(self, text=None, uid=TEACHER, editable=True):
             self.text = text
             self.from_user = _Stub.User(uid)
             self.chat = _Stub.Chat(uid)
+            self.editable = editable
 
         async def answer(self, text, reply_markup=None, **kw):
             _Stub.log.append(text)
+            _Stub.sent.append(text)
+            _Stub.keyboards.append(reply_markup)
+            return self
+
+        async def edit_text(self, text, reply_markup=None, **kw):
+            if not self.editable:
+                raise RuntimeError("message can't be edited")
+            _Stub.log.append(text)
+            _Stub.edited.append(text)
             _Stub.keyboards.append(reply_markup)
             return self
 
@@ -312,8 +328,15 @@ class _Stub:
         async def answer(self, *a, **kw):
             return None
 
-    log: list = []
+    log: list = []       # всё, что бот показал, в порядке появления
+    sent: list = []      # новые сообщения
+    edited: list = []    # замены уже показанного
     keyboards: list = []
+
+    @classmethod
+    def clear(cls) -> None:
+        for bucket in (cls.log, cls.sent, cls.edited, cls.keyboards):
+            bucket.clear()
 
 
 class TestUploadWizard:
@@ -340,8 +363,7 @@ class TestUploadWizard:
             _upload(SAMPLE_ONE)
             teacher_content.rebuild(TEACHER, SUBJECT)
 
-            _Stub.log.clear()
-            _Stub.keyboards.clear()
+            _Stub.clear()
             yield tu, FSMContext(
                 storage=MemoryStorage(), key=StorageKey(1, TEACHER, TEACHER)
             )
@@ -395,7 +417,7 @@ class TestUploadWizard:
 
         await tu.sort_entry(_Stub.Callback("trainer:sort"), state)
         await tu.section_chosen(_Stub.Callback(f"{tu.SEC_PREFIX}:4"), state)
-        _Stub.log.clear()
+        _Stub.clear()
         await tu.topic_chosen(_Stub.Callback(f"{tu.TOP_PREFIX}:back"), state)
 
         assert any("раздел" in text.lower() for text in _Stub.log)
@@ -423,7 +445,7 @@ class TestUploadWizard:
 
         await tu.sort_entry(_Stub.Callback("trainer:sort"), state)
         await tu.section_chosen(_Stub.Callback(f"{tu.SEC_PREFIX}:4"), state)
-        _Stub.log.clear()
+        _Stub.clear()
         await tu.topic_chosen(_Stub.Callback(f"{tu.TOP_PREFIX}:4_99"), state)
 
         assert any("Такой темы нет" in text for text in _Stub.log)
@@ -455,6 +477,97 @@ class TestUploadWizard:
         await tu.topic_chosen(_Stub.Callback(f"{tu.TOP_PREFIX}:4_6"), state)
 
         assert (await state.get_data()).get("section") is None
+
+
+class TestOneScreen:
+    """Мастер живёт одним экраном, а не лентой сообщений.
+
+    Каждый шаг отдельным сообщением — это чат, в котором до нужного места
+    надо листать, а старые клавиатуры остаются живыми и по ним нажимают.
+    """
+
+    @pytest_asyncio.fixture
+    async def flow(self, env):
+        from aiogram.fsm.context import FSMContext
+        from aiogram.fsm.storage.base import StorageKey
+        from aiogram.fsm.storage.memory import MemoryStorage
+
+        import bot.handlers.teacher_upload as tu
+        import database.db as db_module
+        from database.models import ROLE_TEACHER
+
+        saved_db = db_module.DB_PATH
+        db_module.DB_PATH = str(env / "screen.sqlite3")
+        try:
+            await db_module.init_db()
+            await db_module.ensure_user(TEACHER)
+            await db_module.set_role(TEACHER, ROLE_TEACHER)
+            await db_module.set_subject(TEACHER, SUBJECT)
+
+            _upload(SAMPLE_ONE)
+            _upload(SAMPLE_TWO)
+            teacher_content.rebuild(TEACHER, SUBJECT)
+
+            _Stub.clear()
+            yield tu, FSMContext(
+                storage=MemoryStorage(), key=StorageKey(1, TEACHER, TEACHER)
+            )
+        finally:
+            db_module.DB_PATH = saved_db
+
+    async def test_steps_replace_each_other(self, flow):
+        tu, state = flow
+
+        await tu.sort_entry(_Stub.Callback("trainer:sort"), state)
+        _Stub.clear()
+
+        await tu.section_chosen(_Stub.Callback(f"{tu.SEC_PREFIX}:4"), state)
+        await tu.topic_chosen(_Stub.Callback(f"{tu.TOP_PREFIX}:4_6"), state)
+
+        assert _Stub.sent == []
+        assert len(_Stub.edited) == 2
+
+    async def test_sorting_a_pile_does_not_pile_up_messages(self, flow):
+        """Два файла — два экрана, а не четыре сообщения."""
+        tu, state = flow
+
+        await tu.sort_entry(_Stub.Callback("trainer:sort"), state)
+        _Stub.clear()
+
+        for _ in range(2):
+            await tu.section_chosen(_Stub.Callback(f"{tu.SEC_PREFIX}:4"), state)
+            await tu.topic_chosen(
+                _Stub.Callback(f"{tu.TOP_PREFIX}:{tu.WHOLE_SECTION_KEY}"), state
+            )
+
+        assert _Stub.sent == []
+
+    async def test_result_of_the_previous_file_is_not_lost(self, flow):
+        """Экран один, но судьба разложенного файла на нём видна."""
+        tu, state = flow
+
+        await tu.sort_entry(_Stub.Callback("trainer:sort"), state)
+        await tu.section_chosen(_Stub.Callback(f"{tu.SEC_PREFIX}:4"), state)
+        _Stub.clear()
+        await tu.topic_chosen(_Stub.Callback(f"{tu.TOP_PREFIX}:4_6"), state)
+
+        assert any("→" in text for text in _Stub.log)
+
+    async def test_reply_to_a_typed_name_is_a_new_message(self, flow):
+        """Сообщение пользователя заменить нельзя — отвечаем новым."""
+        tu, state = flow
+
+        await tu.sort_entry(_Stub.Callback("trainer:sort"), state)
+        await tu.section_chosen(_Stub.Callback(f"{tu.SEC_PREFIX}:4"), state)
+        await tu.topic_chosen(_Stub.Callback(f"{tu.TOP_PREFIX}:new"), state)
+        _Stub.clear()
+
+        await tu.topic_title_entered(
+            _Stub.Message("Своя тема", editable=False), state
+        )
+
+        assert len(_Stub.sent) == 1
+        assert _Stub.edited == []
 
 
 class TestMatching:

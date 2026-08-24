@@ -312,6 +312,12 @@ class _Stub:
             _Stub.log.append(text)
             return self
 
+        async def edit_text(self, text, reply_markup=None, **kw):
+            """Мастер заменяет свой прошлый экран, а не шлёт новый."""
+            self.sent.append(text)
+            _Stub.log.append(text)
+            return self
+
     class Callback:
         def __init__(self, data, uid=TEACHER):
             self.data = data
@@ -380,7 +386,8 @@ class TestSortingFlow:
             )
 
         assert (await state.get_data()).get("sec_target") is None
-        assert "Готово, все файлы разложены." in _Stub.log
+        # Итог показывается вместе с судьбой последнего файла, одним экраном
+        assert any("Готово, все файлы разложены." in text for text in _Stub.log)
 
     async def test_stale_button_does_not_pretend(self, flow):
         tu, state = flow
