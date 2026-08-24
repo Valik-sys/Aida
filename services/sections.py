@@ -38,6 +38,14 @@ CUSTOM_PREFIX = "c"
 # Длина названия своего раздела: больше не влезает в кнопку
 MAX_TITLE = 40
 
+# Разделитель уровней в ключе: "6" — раздел, "6_1" — тема внутри него.
+# Тот же символ, что в кодах тем базового контента, поэтому ключ темы
+# у преподавателя и у общих вопросов читается одинаково.
+TOPIC_SEP = "_"
+
+# Сколько символов названия темы влезает в кнопку, не превращая её в простыню
+MAX_BUTTON = 38
+
 
 @dataclass(frozen=True)
 class Section:
@@ -70,15 +78,32 @@ def title_of(subject: str, key: str, custom: Optional[Dict[str, str]] = None) ->
     """Название раздела по ключу. Неизвестный ключ не прячем — показываем как есть."""
     if not key:
         return UNSORTED_TITLE
+    if is_topic(key):
+        return topic_title(subject, key)
     for section in merged(subject, custom):
         if section.key == key:
             return section.label
     return f"Раздел {key}"
 
 
-def is_valid(subject: str, key: str, custom: Optional[Dict[str, str]] = None) -> bool:
+def is_valid(
+    subject: str,
+    key: str,
+    custom: Optional[Dict[str, str]] = None,
+    custom_topics: Optional[Dict[str, str]] = None,
+) -> bool:
+    """Существует ли такой раздел или такая тема.
+
+    Тему проверяем внутри её раздела: ключ несёт раздел в себе, поэтому
+    «6_1» в разделе 7 не подтвердится, даже если такая тема есть у соседа.
+    """
     if key == NONE_KEY:
         return True
+    if is_topic(key):
+        section = section_of(key)
+        if not is_valid(subject, section, custom):
+            return False
+        return any(t.key == key for t in merged_topics(subject, section, custom_topics))
     return any(s.key == key for s in merged(subject, custom))
 
 
@@ -99,6 +124,124 @@ def clean_title(text: str) -> str:
     """Название своего раздела из того, что ввёл преподаватель."""
     title = " ".join((text or "").split())
     return title[:MAX_TITLE]
+
+
+# ---------- Темы: второй уровень внутри раздела ----------
+#
+# Ключ темы начинается с ключа раздела: "6_1" лежит в разделе "6", своя тема
+# преподавателя в том же разделе — "6_c1". Из этого следует главное свойство:
+# **раздел всегда восстанавливается из темы**, поэтому в поле «Раздел» строки
+# вопроса хранится один ключ — либо раздела, либо темы, — и старые материалы,
+# разложенные до появления тем, продолжают работать без пересборки.
+
+
+def section_of(key: str) -> str:
+    """Раздел, которому принадлежит ключ. Для ключа раздела — он сам."""
+    return (key or "").split(TOPIC_SEP)[0]
+
+
+def is_topic(key: str) -> bool:
+    return TOPIC_SEP in (key or "")
+
+
+def base_topics(subject: str, section: str) -> List[Section]:
+    """Темы программы внутри раздела. Пусто — если сетки тем нет."""
+    for item in subjects_cfg.subject_sections(subject):
+        if item["key"] == section:
+            return [
+                Section(key=t["key"], title=t["title"])
+                for t in (item.get("topics") or [])
+            ]
+    return []
+
+
+def merged_topics(
+    subject: str,
+    section: str,
+    custom: Optional[Dict[str, str]] = None,
+) -> List[Section]:
+    """Темы программы плюс свои, добавленные преподавателем в этот раздел.
+
+    `custom` — все свои темы преподавателя по всем разделам сразу: ключ несёт
+    в себе раздел, поэтому отбор идёт по нему, а не по отдельному полю.
+    """
+    out = base_topics(subject, section)
+    own = {
+        key: title
+        for key, title in (custom or {}).items()
+        if section_of(key) == section
+    }
+    for key, title in sorted(own.items()):
+        out.append(Section(key=key, title=title))
+    return out
+
+
+def topic_title(
+    subject: str,
+    key: str,
+    custom: Optional[Dict[str, str]] = None,
+) -> str:
+    """Название темы по ключу. Неизвестный ключ показываем как есть."""
+    for topic in merged_topics(subject, section_of(key), custom):
+        if topic.key == key:
+            return topic.title
+    return key
+
+
+def next_custom_topic_key(
+    section: str,
+    custom: Optional[Dict[str, str]] = None,
+) -> str:
+    """Следующий свободный ключ своей темы в этом разделе: "6_c1", "6_c2"…
+
+    Как и у разделов, счёт идёт от максимума, а не от количества: иначе
+    после удаления темы ключ переиспользуется и старые файлы уедут в чужую.
+    """
+    prefix = f"{section}{TOPIC_SEP}{CUSTOM_PREFIX}"
+    used = []
+    for key in (custom or {}):
+        if key.startswith(prefix) and key[len(prefix):].isdigit():
+            used.append(int(key[len(prefix):]))
+    return f"{prefix}{max(used, default=0) + 1}"
+
+
+def button_label(title: str) -> str:
+    """Подпись темы для кнопки: длинные названия режем по границе фразы.
+
+    Названия тем в программе — это перечисления через точку («Реформация.
+    Религиозные войны… Контрреформация»). Первая фраза узнаётся, а целиком
+    такая строка превращает клавиатуру в стену текста.
+    """
+    title = " ".join((title or "").split())
+    if len(title) <= MAX_BUTTON:
+        return title
+
+    head = title.split(". ")[0]
+    if len(head) <= MAX_BUTTON:
+        return head + "…"
+    return title[: MAX_BUTTON - 1].rstrip(" ,.—-") + "…"
+
+
+def place_title(
+    subject: str,
+    key: str,
+    custom_sections: Optional[Dict[str, str]] = None,
+    custom_topics: Optional[Dict[str, str]] = None,
+) -> str:
+    """Куда положен файл, одной строкой: раздел или «раздел → тема».
+
+    Единственное место, где ключ превращается в человеческую подпись.
+    Экраны загрузки, состава тренажёра и списка файлов зовут её, а не
+    собирают строку сами — иначе одно и то же место называлось бы
+    по-разному в трёх местах.
+    """
+    if not key:
+        return UNSORTED_TITLE
+    section = section_of(key)
+    section_name = title_of(subject, section, custom_sections)
+    if not is_topic(key):
+        return section_name
+    return f"{section_name} → {topic_title(subject, key, custom_topics)}"
 
 
 # ---------- Подсказка по имени файла ----------

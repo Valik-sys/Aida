@@ -23,6 +23,7 @@ from bot.keyboards.inline import (
     report_reasons_kb,
     reported_open_kb,
     sections_kb,
+    student_topics_kb,
     short_text,
     test_result_kb,
     tests_root_kb,
@@ -96,6 +97,13 @@ def _match_section(row_section: str, key) -> bool:
         return False
     if s == k or s == f"раздел {k}":
         return True
+    # Тему сверяем только точно: «6_1» — это ровно она, а не соседняя «6_10».
+    if sections_lib.is_topic(k):
+        return False
+    # Раздел вбирает в себя свои темы: выбрав раздел 6, ученик получает
+    # и вопросы, разложенные по темам внутри него.
+    if sections_lib.is_topic(s):
+        return sections_lib.section_of(s) == k
     # Свои разделы сверяем только точно: иначе «c1» попадал бы в раздел 1
     # по вхождению цифры, и чужие вопросы утекали бы в сетку программы.
     if _is_custom(s) or _is_custom(k):
@@ -990,9 +998,11 @@ def _available_sections(bundle) -> List[Tuple[str, str]]:
     те, которым раздел не назначен. Обычно это полные билеты, где разделы
     перемешаны: назначить им один нельзя, а тренироваться на них нужно.
     """
+    # Вопрос, разложенный по теме, считается и за свой раздел: иначе раздел,
+    # где всё разложено по темам, выглядел бы пустым и в список бы не попал.
     counts: Dict[str, int] = {}
     for row in bundle.rows:
-        key = (row.get("Раздел") or "").strip()
+        key = sections_lib.section_of((row.get("Раздел") or "").strip())
         counts[key] = counts.get(key, 0) + 1
 
     custom: Dict[str, str] = {}
@@ -1142,8 +1152,61 @@ async def random_ticket(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
+def _available_topics(bundle, section: str) -> List[Tuple[str, str, int]]:
+    """Темы этого раздела, в которых у ученика есть вопросы.
+
+    Пустые темы не показываем по той же причине, что и пустые разделы:
+    из пятидесяти семи тем программы у преподавателя обычно разложены три.
+    """
+    counts: Dict[str, int] = {}
+    for row in bundle.rows:
+        key = (row.get("Раздел") or "").strip()
+        if sections_lib.is_topic(key) and sections_lib.section_of(key) == section:
+            counts[key] = counts.get(key, 0) + 1
+
+    if not counts:
+        return []
+
+    custom_topics: Dict[str, str] = {}
+    if bundle.teacher_id:
+        custom_topics = teacher_content.custom_topics(bundle.teacher_id, bundle.subject)
+
+    out: List[Tuple[str, str, int]] = []
+    for topic in sections_lib.merged_topics(bundle.subject, section, custom_topics):
+        count = counts.get(topic.key)
+        if count:
+            out.append((topic.key, topic.title, count))
+    return out
+
+
 @router.callback_query(lambda c: c.data and c.data.startswith("tests:section:"))  # type: ignore[call-arg]
 async def pick_section(callback: CallbackQuery, state: FSMContext) -> None:
+    key = (callback.data or "").split(":")[-1].strip()
+    if not key:
+        await callback.answer()
+        return
+
+    # У «смешанных вопросов» тем нет по определению — там вопросы разных
+    # разделов вперемешку.
+    if key != UNSORTED_KEY and not sections_lib.is_topic(key):
+        bundle = await content_provider.get_tests(callback.from_user.id)
+        topics = _available_topics(bundle, key)
+        if topics:
+            await callback.message.edit_text(
+                f"{sections_lib.title_of(bundle.subject, key)}\n\nВыбери тему:",
+                reply_markup=student_topics_kb(topics, key),
+            )
+            await callback.answer()
+            return
+
+    await state.update_data(test_filter_type="section", test_filter_value=key, test_qty=None)
+    await callback.message.edit_text("Сколько вопросов нужно?", reply_markup=quantity_kb())
+    await callback.answer()
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("tests:secall:"))  # type: ignore[call-arg]
+async def pick_section_whole(callback: CallbackQuery, state: FSMContext) -> None:
+    """Весь раздел целиком, минуя список тем."""
     key = (callback.data or "").split(":")[-1].strip()
     if not key:
         await callback.answer()

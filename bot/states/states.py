@@ -11,6 +11,8 @@ class TeacherUpload(StatesGroup):
     waiting_file = State()
     waiting_section = State()       # файл разобран, ждём выбор раздела
     waiting_section_title = State() # ждём название своего раздела
+    waiting_topic = State()         # раздел выбран, ждём тему внутри него
+    waiting_topic_title = State()   # ждём название своей темы
 
 
 class Register(StatesGroup):

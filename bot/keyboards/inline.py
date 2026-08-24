@@ -187,6 +187,45 @@ def sections_kb_for_upload(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+TOP_PREFIX = "top"
+
+# «Весь раздел» — не отказ от темы, а законный выбор: файл с полным билетом
+# по разделу темой не разложить, а место ему нужно.
+WHOLE_SECTION_KEY = "whole"
+WHOLE_SECTION_LABEL = "📚 Весь раздел, без темы"
+
+
+def topics_kb_for_upload(
+    topics: Sequence,
+    *,
+    allow_back: bool = True,
+) -> InlineKeyboardMarkup:
+    """Темы внутри выбранного раздела.
+
+    Подписи режутся по границе фразы: названия тем в программе — это
+    перечисления через точку, целиком они превращают клавиатуру в стену.
+    """
+    rows: List[List[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(
+            text=sections_lib.button_label(t.title),
+            callback_data=f"{TOP_PREFIX}:{t.key}",
+        )]
+        for t in topics
+    ]
+    rows.append([InlineKeyboardButton(
+        text="➕ Новая тема", callback_data=f"{TOP_PREFIX}:new"
+    )])
+    rows.append([InlineKeyboardButton(
+        text=WHOLE_SECTION_LABEL,
+        callback_data=f"{TOP_PREFIX}:{WHOLE_SECTION_KEY}",
+    )])
+    if allow_back:
+        rows.append([InlineKeyboardButton(
+            text="← Назад к разделам", callback_data=f"{TOP_PREFIX}:back"
+        )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def uploaded_kb(
     section_label: str | None = None,
     file_token: str | None = None,
@@ -394,6 +433,34 @@ def sections_kb(sections: Sequence) -> InlineKeyboardMarkup:
             text=label, callback_data=f"tests:section:{key}"
         )])
 
+    rows.append([InlineKeyboardButton(text=MENU_BTN_HOME, callback_data="menu:back_to_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def student_topics_kb(topics: Sequence, section_key: str) -> InlineKeyboardMarkup:
+    """Темы внутри раздела: список троек (ключ, подпись, сколько вопросов).
+
+    «Весь раздел целиком» стоит последним, а не первым: ученик пришёл сюда
+    за темой, которую разобрали на занятии, и первым должно быть то, за чем
+    он пришёл. Пустые темы в список не попадают.
+    """
+    rows: List[List[InlineKeyboardButton]] = []
+
+    for key, label, count in topics:
+        rows.append([InlineKeyboardButton(
+            text=f"{sections_lib.button_label(label)} · {count}",
+            callback_data=f"tests:section:{key}",
+        )])
+
+    # Отдельный префикс, а не «tests:section:6»: тот снова открыл бы список тем,
+    # и «весь раздел» превратился бы в кольцо.
+    rows.append([InlineKeyboardButton(
+        text="▶️ Весь раздел целиком",
+        callback_data=f"tests:secall:{section_key}",
+    )])
+    rows.append([InlineKeyboardButton(
+        text="← Назад к разделам", callback_data="tests:by_section"
+    )])
     rows.append([InlineKeyboardButton(text=MENU_BTN_HOME, callback_data="menu:back_to_main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

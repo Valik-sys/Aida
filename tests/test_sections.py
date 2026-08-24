@@ -385,10 +385,14 @@ class TestSortingFlow:
     async def test_stale_button_does_not_pretend(self, flow):
         tu, state = flow
 
-        # Разложили всё, а потом нажали кнопку в старом сообщении
+        # Разложили всё, а потом нажали кнопку в старом сообщении.
+        # Раскладка идёт в два нажатия: раздел, затем тема.
         await tu.sort_entry(_Stub.Callback("trainer:sort"), state)
-        await tu.section_chosen(_Stub.Callback(f"{tu.SEC_PREFIX}:6"), state)
-        await tu.section_chosen(_Stub.Callback(f"{tu.SEC_PREFIX}:4"), state)
+        for key in ("6", "4"):
+            await tu.section_chosen(_Stub.Callback(f"{tu.SEC_PREFIX}:{key}"), state)
+            await tu.topic_chosen(
+                _Stub.Callback(f"{tu.TOP_PREFIX}:{tu.WHOLE_SECTION_KEY}"), state
+            )
         _Stub.log.clear()
 
         await tu.section_chosen(_Stub.Callback(f"{tu.SEC_PREFIX}:4"), state)

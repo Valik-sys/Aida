@@ -556,14 +556,27 @@ def _sections_text(teacher_id: int, subject: str) -> tuple[str, bool]:
     """
     counts = teacher_content.counts_by_section(teacher_id, subject)
     custom = teacher_content.custom_sections(teacher_id, subject)
+    custom_topics = teacher_content.custom_topics(teacher_id, subject)
 
-    lines = ["🗂 Разделы", ""]
+    lines = ["🗂 Разделы и темы", ""]
     filled = 0
     for section in sections_lib.merged(subject, custom):
-        count = counts.get(section.key, 0)
-        if count:
+        # В разделе лежит и то, что положено в него самого, и то, что
+        # разложено по темам внутри: в итоге у раздела показывается сумма,
+        # а темы перечисляются под ним.
+        topics = [
+            (topic, counts.get(topic.key, 0))
+            for topic in sections_lib.merged_topics(subject, section.key, custom_topics)
+        ]
+        topics = [(topic, count) for topic, count in topics if count]
+        own = counts.get(section.key, 0)
+        total = own + sum(count for _, count in topics)
+
+        if total:
             filled += 1
-            lines.append(f"{section.label} — {count}")
+            lines.append(f"{section.label} — {total}")
+            for topic, count in topics:
+                lines.append(f"   • {sections_lib.button_label(topic.title)} — {count}")
 
     unsorted_count = counts.get("", 0)
     if not filled and not unsorted_count:
@@ -583,7 +596,8 @@ def _sections_text(teacher_id: int, subject: str) -> tuple[str, bool]:
             )
 
     lines.append(
-        "\nРаздел выбирается при загрузке файла и относится ко всему файлу целиком."
+        "\nРаздел и тема выбираются при загрузке файла "
+        "и относятся ко всему файлу целиком."
     )
     return "\n".join(lines), bool(pending)
 

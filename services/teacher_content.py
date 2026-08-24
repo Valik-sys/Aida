@@ -96,6 +96,7 @@ def rebuild(
     sections_map = _sections_from(previous)
     sections_map.update(assign or {})
     custom = dict(previous.get("sections") or {})
+    custom_topics_map = dict(previous.get("topics") or {})
 
     manifest_files: List[Dict[str, object]] = []
     rejected_all: List[Dict[str, str]] = []
@@ -162,6 +163,7 @@ def rebuild(
             "parser_version": ticket_parser.PARSER_VERSION,
             "updated_at": _now(),
             "sections": custom,
+            "topics": custom_topics_map,
             "files": manifest_files,
             "accepted_total": result.total_accepted,
             "rejected_total": result.total_rejected,
@@ -314,6 +316,40 @@ def add_custom_section(tg_id: int, subject: str, title: str) -> Optional[str]:
     key = sections_lib.next_custom_key(custom)
     custom[key] = title
     manifest["sections"] = custom
+    storage.write_json(storage.teacher_manifest_path(tg_id, subject), manifest)
+    return key
+
+
+def custom_topics(tg_id: int, subject: str) -> Dict[str, str]:
+    """Темы, добавленные преподавателем сверх программы, по всем разделам.
+
+    Ключ несёт в себе раздел («6_c1»), поэтому отдельного поля не нужно
+    и одна плоская таблица обслуживает все разделы сразу.
+    """
+    data = load_manifest(tg_id, subject).get("topics") or {}
+    return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+
+
+def add_custom_topic(tg_id: int, subject: str, section: str, title: str) -> Optional[str]:
+    """Заводит свою тему в разделе и возвращает её ключ. None — если пусто.
+
+    Одинаковые названия внутри раздела не плодим — как и у разделов:
+    повторный ввод отдаёт тот же ключ.
+    """
+    title = sections_lib.clean_title(title)
+    if not title:
+        return None
+
+    manifest = load_manifest(tg_id, subject)
+    topics = {str(k): str(v) for k, v in (manifest.get("topics") or {}).items()}
+
+    for key, existing in topics.items():
+        if sections_lib.section_of(key) == section and existing.casefold() == title.casefold():
+            return key
+
+    key = sections_lib.next_custom_topic_key(section, topics)
+    topics[key] = title
+    manifest["topics"] = topics
     storage.write_json(storage.teacher_manifest_path(tg_id, subject), manifest)
     return key
 

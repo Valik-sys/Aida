@@ -1,0 +1,494 @@
+"""Темы — второй уровень внутри раздела.
+
+Главное, что здесь проверяется: **ключ темы несёт в себе раздел**. Из этого
+следует всё остальное — раздел восстанавливается из темы без отдельного поля,
+старые материалы, разложенные до появления тем, продолжают работать, а выбор
+раздела у ученика вбирает и то, что разложено по темам внутри него.
+
+Второй инвариант тот же, что у разделов: раскладка живёт в манифесте и
+переживает пересборку `tests.json` из `uploads/`.
+"""
+
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+import pytest
+import pytest_asyncio
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import subjects as subjects_cfg  # noqa: E402
+from services import sections as sections_lib  # noqa: E402
+from services import storage, teacher_content  # noqa: E402
+
+SAMPLES = ROOT / "data/raw/tests"
+SUBJECT = "history"
+TEACHER = 7401
+STUDENT = 7402
+
+SAMPLE_ONE = "Раннее Новое время.docx"
+SAMPLE_TWO = "1. 1918-1945 гг..docx"
+
+pytestmark = pytest.mark.skipif(
+    not (SAMPLES / SAMPLE_ONE).exists(), reason="нет образцов билетов"
+)
+
+
+@pytest.fixture
+def env():
+    tmpdir = Path(tempfile.mkdtemp(prefix="aida_topics_"))
+    saved = (storage.DATA_ROOT, storage.SUBJECTS_ROOT, storage.TEACHERS_ROOT)
+    storage.DATA_ROOT = tmpdir / "data"
+    storage.SUBJECTS_ROOT = storage.DATA_ROOT / "subjects"
+    storage.TEACHERS_ROOT = storage.DATA_ROOT / "teachers"
+    storage.ensure_teacher_dirs(TEACHER, SUBJECT)
+    try:
+        yield tmpdir
+    finally:
+        (storage.DATA_ROOT, storage.SUBJECTS_ROOT, storage.TEACHERS_ROOT) = saved
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _upload(name: str) -> str:
+    target, _, _ = teacher_content.store_upload(TEACHER, SUBJECT, SAMPLES / name, name)
+    return target.name
+
+
+class TestKeys:
+    """Ключ темы и раздел, который из него читается."""
+
+    def test_section_is_read_back_from_topic(self):
+        assert sections_lib.section_of("6_1") == "6"
+        assert sections_lib.section_of("6_9_10") == "6"
+        assert sections_lib.section_of("6") == "6"
+        assert sections_lib.section_of("") == ""
+
+    def test_custom_section_keeps_its_key(self):
+        # Своя тема в своём разделе: «c1_c1» лежит в разделе «c1»
+        assert sections_lib.section_of("c1_c1") == "c1"
+
+    def test_topic_is_distinguished_from_section(self):
+        assert sections_lib.is_topic("6_1")
+        assert not sections_lib.is_topic("6")
+        assert not sections_lib.is_topic("")
+
+    def test_grid_covers_every_section(self):
+        for section in sections_lib.base_sections(SUBJECT):
+            assert sections_lib.base_topics(SUBJECT, section.key), section.key
+
+    def test_topic_keys_start_with_their_section(self):
+        """Иначе раздел из темы прочитается неверно и вопросы уедут к соседу."""
+        for section in sections_lib.base_sections(SUBJECT):
+            for topic in sections_lib.base_topics(SUBJECT, section.key):
+                assert sections_lib.section_of(topic.key) == section.key
+
+    def test_topic_codes_match_base_content(self):
+        """Коды тем совпадают с «Тема_код» базового контента и вкладками теории.
+
+        Расхождение ничего не сломает громко — просто перестанет находиться
+        теория, и заметят это не скоро.
+        """
+        from bot.handlers import topics as topics_handler
+
+        for section, codes in topics_handler.SUBTOPIC_CODES.items():
+            assert [t.key for t in sections_lib.base_topics(SUBJECT, section)] == codes
+
+
+class TestValidation:
+    """Что считается существующей темой."""
+
+    def test_topic_of_its_own_section_is_valid(self):
+        assert sections_lib.is_valid(SUBJECT, "6_1")
+
+    def test_topic_of_another_section_is_rejected(self):
+        # «6_1» существует, но в разделе 6 — а ключ утверждает раздел 7
+        assert not sections_lib.is_valid(SUBJECT, "7_1_6")
+
+    def test_invented_topic_is_rejected(self):
+        assert not sections_lib.is_valid(SUBJECT, "6_99")
+
+    def test_custom_topic_is_valid_only_with_manifest(self):
+        assert not sections_lib.is_valid(SUBJECT, "6_c1")
+        assert sections_lib.is_valid(SUBJECT, "6_c1", None, {"6_c1": "Своя тема"})
+
+
+class TestCustomTopics:
+    """Свои темы преподавателя."""
+
+    def test_added_topic_gets_key_inside_its_section(self, env):
+        key = teacher_content.add_custom_topic(TEACHER, SUBJECT, "6", "Партизаны")
+        assert sections_lib.section_of(key) == "6"
+        assert teacher_content.custom_topics(TEACHER, SUBJECT)[key] == "Партизаны"
+
+    def test_same_title_does_not_multiply(self, env):
+        first = teacher_content.add_custom_topic(TEACHER, SUBJECT, "6", "Партизаны")
+        second = teacher_content.add_custom_topic(TEACHER, SUBJECT, "6", "партизаны")
+        assert first == second
+
+    def test_same_title_in_another_section_is_another_topic(self, env):
+        first = teacher_content.add_custom_topic(TEACHER, SUBJECT, "6", "Культура")
+        second = teacher_content.add_custom_topic(TEACHER, SUBJECT, "7", "Культура")
+        assert first != second
+        assert sections_lib.section_of(second) == "7"
+
+    def test_empty_title_is_refused(self, env):
+        assert teacher_content.add_custom_topic(TEACHER, SUBJECT, "6", "   ") is None
+
+    def test_own_topics_appear_next_to_programme_ones(self, env):
+        key = teacher_content.add_custom_topic(TEACHER, SUBJECT, "6", "Партизаны")
+        custom = teacher_content.custom_topics(TEACHER, SUBJECT)
+        merged = sections_lib.merged_topics(SUBJECT, "6", custom)
+
+        assert key in [t.key for t in merged]
+        # Чужие темы в этот раздел не подмешиваются
+        assert all(sections_lib.section_of(t.key) == "6" for t in merged)
+
+    def test_topics_survive_rebuild(self, env):
+        """Пересборка из uploads/ не должна стирать список своих тем."""
+        _upload(SAMPLE_ONE)
+        key = teacher_content.add_custom_topic(TEACHER, SUBJECT, "4", "Своя тема")
+        teacher_content.rebuild(TEACHER, SUBJECT)
+
+        assert teacher_content.custom_topics(TEACHER, SUBJECT).get(key) == "Своя тема"
+
+
+class TestFilePlacement:
+    """Файл, положенный в тему."""
+
+    def test_topic_reaches_every_row_of_the_file(self, env):
+        name = _upload(SAMPLE_ONE)
+        teacher_content.rebuild(TEACHER, SUBJECT, assign={name: "4_6"})
+
+        rows = teacher_content.load_tests(TEACHER, SUBJECT)
+        assert rows
+        assert {row["Раздел"] for row in rows} == {"4_6"}
+
+    def test_placement_survives_rebuild(self, env):
+        """Тот же инвариант, что у разделов: раскладка живёт в манифесте."""
+        name = _upload(SAMPLE_ONE)
+        teacher_content.rebuild(TEACHER, SUBJECT, assign={name: "4_6"})
+        teacher_content.rebuild(TEACHER, SUBJECT)
+
+        rows = teacher_content.load_tests(TEACHER, SUBJECT)
+        assert {row["Раздел"] for row in rows} == {"4_6"}
+
+    def test_moving_file_to_topic_does_not_reparse(self, env):
+        name = _upload(SAMPLE_ONE)
+        teacher_content.rebuild(TEACHER, SUBJECT, assign={name: "4"})
+
+        assert teacher_content.set_file_section(TEACHER, SUBJECT, name, "4_6")
+
+        rows = teacher_content.load_tests(TEACHER, SUBJECT)
+        assert {row["Раздел"] for row in rows} == {"4_6"}
+
+    def test_files_in_different_topics_do_not_mix(self, env):
+        one = _upload(SAMPLE_ONE)
+        two = _upload(SAMPLE_TWO)
+        teacher_content.rebuild(
+            TEACHER, SUBJECT, assign={one: "4_6", two: "6_9_10"}
+        )
+
+        rows = teacher_content.load_tests(TEACHER, SUBJECT)
+        assert {row["Раздел"] for row in rows} == {"4_6", "6_9_10"}
+
+
+class TestLabels:
+    """Как место называется на экране."""
+
+    def test_place_shows_section_and_topic(self):
+        title = sections_lib.place_title(SUBJECT, "6_8")
+        assert "6." in title
+        assert "Вторая мировая война" in title
+        assert "→" in title
+
+    def test_place_of_section_has_no_arrow(self):
+        assert "→" not in sections_lib.place_title(SUBJECT, "6")
+
+    def test_place_of_nothing_is_the_mixed_pile(self):
+        assert sections_lib.place_title(SUBJECT, "") == sections_lib.UNSORTED_TITLE
+
+    def test_custom_topic_is_named_from_the_manifest(self):
+        title = sections_lib.place_title(
+            SUBJECT, "6_c1", None, {"6_c1": "Партизанское движение"}
+        )
+        assert "Партизанское движение" in title
+
+    def test_long_title_is_cut_at_the_phrase(self):
+        label = sections_lib.button_label(
+            "Древнейшие верования. Искусство. Особенности древнейших цивилизаций"
+        )
+        assert label == "Древнейшие верования…"
+
+    def test_short_title_is_left_alone(self):
+        assert sections_lib.button_label("Образование ВКЛ") == "Образование ВКЛ"
+
+    def test_title_without_phrases_is_cut_by_length(self):
+        label = sections_lib.button_label("а" * 80)
+        assert len(label) <= sections_lib.MAX_BUTTON
+        assert label.endswith("…")
+
+
+class TestStudentSelection:
+    """Что видит ученик, когда вопросы разложены по темам."""
+
+    class _Bundle:
+        def __init__(self, rows, teacher_id=None):
+            self.rows = rows
+            self.teacher_id = teacher_id
+            self.subject = SUBJECT
+
+    def _rows(self, *keys):
+        return [{"Раздел": key, "Вопрос": f"в{i}"} for i, key in enumerate(keys)]
+
+    def test_section_counts_include_its_topics(self):
+        from bot.handlers.tests import _available_sections
+
+        bundle = self._Bundle(self._rows("6_1", "6_8", "6"))
+        available = dict(
+            (key, title) for key, title in _available_sections(bundle)
+        )
+        assert "6" in available
+
+    def test_section_full_of_topics_is_not_empty(self):
+        """Раздел, где всё разложено по темам, обязан попасть в список."""
+        from bot.handlers.tests import _available_sections
+
+        bundle = self._Bundle(self._rows("6_1", "6_1"))
+        assert [key for key, _ in _available_sections(bundle)] == ["6"]
+
+    def test_only_non_empty_topics_are_offered(self):
+        from bot.handlers.tests import _available_topics
+
+        bundle = self._Bundle(self._rows("6_1", "6_1", "6_8"))
+        offered = _available_topics(bundle, "6")
+
+        assert [(key, count) for key, _, count in offered] == [("6_1", 2), ("6_8", 1)]
+
+    def test_topics_of_another_section_are_not_offered(self):
+        from bot.handlers.tests import _available_topics
+
+        bundle = self._Bundle(self._rows("6_1", "5_2"))
+        assert [key for key, _, _ in _available_topics(bundle, "5")] == ["5_2"]
+
+    def test_section_without_topics_offers_none(self):
+        from bot.handlers.tests import _available_topics
+
+        bundle = self._Bundle(self._rows("6", "6"))
+        assert _available_topics(bundle, "6") == []
+
+
+class _Stub:
+    """Заглушки сообщения и нажатия: собирают то, что бот отправил."""
+
+    class Chat:
+        def __init__(self, cid):
+            self.id = cid
+
+    class User:
+        def __init__(self, uid):
+            self.id = uid
+
+    class Message:
+        def __init__(self, text=None, uid=TEACHER):
+            self.text = text
+            self.from_user = _Stub.User(uid)
+            self.chat = _Stub.Chat(uid)
+
+        async def answer(self, text, reply_markup=None, **kw):
+            _Stub.log.append(text)
+            _Stub.keyboards.append(reply_markup)
+            return self
+
+    class Callback:
+        def __init__(self, data, uid=TEACHER):
+            self.data = data
+            self.from_user = _Stub.User(uid)
+            self.message = _Stub.Message(uid=uid)
+
+        async def answer(self, *a, **kw):
+            return None
+
+    log: list = []
+    keyboards: list = []
+
+
+class TestUploadWizard:
+    """Мастер загрузки: раздел, затем тема, затем файл."""
+
+    @pytest_asyncio.fixture
+    async def flow(self, env):
+        from aiogram.fsm.context import FSMContext
+        from aiogram.fsm.storage.base import StorageKey
+        from aiogram.fsm.storage.memory import MemoryStorage
+
+        import bot.handlers.teacher_upload as tu
+        import database.db as db_module
+        from database.models import ROLE_TEACHER
+
+        saved_db = db_module.DB_PATH
+        db_module.DB_PATH = str(env / "wizard.sqlite3")
+        try:
+            await db_module.init_db()
+            await db_module.ensure_user(TEACHER)
+            await db_module.set_role(TEACHER, ROLE_TEACHER)
+            await db_module.set_subject(TEACHER, SUBJECT)
+
+            _upload(SAMPLE_ONE)
+            teacher_content.rebuild(TEACHER, SUBJECT)
+
+            _Stub.log.clear()
+            _Stub.keyboards.clear()
+            yield tu, FSMContext(
+                storage=MemoryStorage(), key=StorageKey(1, TEACHER, TEACHER)
+            )
+        finally:
+            db_module.DB_PATH = saved_db
+
+    async def test_section_leads_to_topics(self, flow):
+        tu, state = flow
+
+        await tu.sort_entry(_Stub.Callback("trainer:sort"), state)
+        await tu.section_chosen(_Stub.Callback(f"{tu.SEC_PREFIX}:4"), state)
+
+        assert any("Теперь тема" in text for text in _Stub.log)
+        assert (await state.get_data()).get("sec_section") == "4"
+
+    async def test_chosen_topic_lands_in_rows(self, flow):
+        tu, state = flow
+
+        await tu.sort_entry(_Stub.Callback("trainer:sort"), state)
+        await tu.section_chosen(_Stub.Callback(f"{tu.SEC_PREFIX}:4"), state)
+        await tu.topic_chosen(_Stub.Callback(f"{tu.TOP_PREFIX}:4_6"), state)
+
+        rows = teacher_content.load_tests(TEACHER, SUBJECT)
+        assert {row["Раздел"] for row in rows} == {"4_6"}
+
+    async def test_whole_section_keeps_the_section_key(self, flow):
+        tu, state = flow
+
+        await tu.sort_entry(_Stub.Callback("trainer:sort"), state)
+        await tu.section_chosen(_Stub.Callback(f"{tu.SEC_PREFIX}:4"), state)
+        await tu.topic_chosen(
+            _Stub.Callback(f"{tu.TOP_PREFIX}:{tu.WHOLE_SECTION_KEY}"), state
+        )
+
+        rows = teacher_content.load_tests(TEACHER, SUBJECT)
+        assert {row["Раздел"] for row in rows} == {"4"}
+
+    async def test_mixed_pile_skips_the_topic_step(self, flow):
+        """У «Смешанных вопросов» тем нет — спрашивать нечего."""
+        tu, state = flow
+
+        await tu.sort_entry(_Stub.Callback("trainer:sort"), state)
+        await tu.section_chosen(
+            _Stub.Callback(f"{tu.SEC_PREFIX}:{tu.UNSORTED_KEY}"), state
+        )
+
+        assert not any("Теперь тема" in text for text in _Stub.log)
+
+    async def test_back_returns_to_sections(self, flow):
+        tu, state = flow
+
+        await tu.sort_entry(_Stub.Callback("trainer:sort"), state)
+        await tu.section_chosen(_Stub.Callback(f"{tu.SEC_PREFIX}:4"), state)
+        _Stub.log.clear()
+        await tu.topic_chosen(_Stub.Callback(f"{tu.TOP_PREFIX}:back"), state)
+
+        assert any("раздел" in text.lower() for text in _Stub.log)
+        # Файл при этом не разложен: назад — это не выбор
+        rows = teacher_content.load_tests(TEACHER, SUBJECT)
+        assert {row["Раздел"] for row in rows} == {""}
+
+    async def test_own_topic_is_created_and_applied(self, flow):
+        tu, state = flow
+
+        await tu.sort_entry(_Stub.Callback("trainer:sort"), state)
+        await tu.section_chosen(_Stub.Callback(f"{tu.SEC_PREFIX}:4"), state)
+        await tu.topic_chosen(_Stub.Callback(f"{tu.TOP_PREFIX}:new"), state)
+        await tu.topic_title_entered(_Stub.Message("Своя тема"), state)
+
+        rows = teacher_content.load_tests(TEACHER, SUBJECT)
+        placed = {row["Раздел"] for row in rows}
+        assert len(placed) == 1
+        key = placed.pop()
+        assert sections_lib.section_of(key) == "4"
+        assert teacher_content.custom_topics(TEACHER, SUBJECT)[key] == "Своя тема"
+
+    async def test_invented_topic_is_refused(self, flow):
+        tu, state = flow
+
+        await tu.sort_entry(_Stub.Callback("trainer:sort"), state)
+        await tu.section_chosen(_Stub.Callback(f"{tu.SEC_PREFIX}:4"), state)
+        _Stub.log.clear()
+        await tu.topic_chosen(_Stub.Callback(f"{tu.TOP_PREFIX}:4_99"), state)
+
+        assert any("Такой темы нет" in text for text in _Stub.log)
+        rows = teacher_content.load_tests(TEACHER, SUBJECT)
+        assert {row["Раздел"] for row in rows} == {""}
+
+    async def test_wizard_waits_for_the_file_after_topic(self, flow):
+        """Мастер «раздел → тема → файл»: место запоминается, ждём документ."""
+        tu, state = flow
+
+        await tu._start_upload(_Stub.Message(), state, SUBJECT)
+        await tu.section_chosen(_Stub.Callback(f"{tu.SEC_PREFIX}:4"), state)
+        await tu.topic_chosen(_Stub.Callback(f"{tu.TOP_PREFIX}:4_6"), state)
+
+        data = await state.get_data()
+        assert data.get("section") == "4_6"
+        assert await state.get_state() == tu.TeacherUpload.waiting_file
+
+    async def test_sorting_old_files_does_not_hijack_the_next_upload(self, flow):
+        """Раскладка старых загрузок — не выбор места для следующего файла.
+
+        Иначе преподаватель, разобрав завалы, отправил бы новый файл
+        в последнюю разобранную тему, ничего об этом не зная.
+        """
+        tu, state = flow
+
+        await tu.sort_entry(_Stub.Callback("trainer:sort"), state)
+        await tu.section_chosen(_Stub.Callback(f"{tu.SEC_PREFIX}:4"), state)
+        await tu.topic_chosen(_Stub.Callback(f"{tu.TOP_PREFIX}:4_6"), state)
+
+        assert (await state.get_data()).get("section") is None
+
+
+class TestMatching:
+    """Отбор вопросов по выбранному месту."""
+
+    def test_section_takes_in_its_topics(self):
+        from bot.handlers.tests import _match_section
+
+        assert _match_section("6_1", "6")
+        assert _match_section("6_9_10", "6")
+
+    def test_topic_takes_only_itself(self):
+        from bot.handlers.tests import _match_section
+
+        assert _match_section("6_1", "6_1")
+        assert not _match_section("6", "6_1")
+        # «6_1» и «6_10» — разные темы, и вхождение строки их путает
+        assert not _match_section("6_10", "6_1")
+
+    def test_neighbours_do_not_leak(self):
+        from bot.handlers.tests import _match_section
+
+        assert not _match_section("5_1", "6")
+        assert not _match_section("6_1", "5")
+
+    def test_mixed_pile_stays_separate(self):
+        from bot.handlers.tests import _match_section
+
+        assert not _match_section("6_1", "")
+        assert _match_section("", "")
+
+    def test_custom_section_takes_in_its_own_topics(self):
+        from bot.handlers.tests import _match_section
+
+        assert _match_section("c1_c1", "c1")
+        assert not _match_section("c1_c1", "c2")
+        assert not _match_section("c1_c1", "1")
