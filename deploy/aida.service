@@ -1,0 +1,38 @@
+; Пример юнита systemd для AIda.
+; Подправь User и пути под свой сервер, затем:
+;   sudo cp deploy/aida.service /etc/systemd/system/
+;   sudo systemctl daemon-reload
+;   sudo systemctl enable --now aida
+
+[Unit]
+Description=AIda Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aida
+WorkingDirectory=/opt/aida
+ExecStart=/opt/aida/.venv/bin/python -m bot.main
+
+; Перезапуск при падении, но не чаще раза в 10 секунд —
+; иначе при неверном токене юнит будет молотить в цикле
+Restart=always
+RestartSec=10
+
+; Логи уходят в journalctl, буферизацию Python выключаем,
+; иначе сообщения появляются с задержкой
+Environment=PYTHONUNBUFFERED=1
+
+; Данные преподавателей и векторная база лежат в WorkingDirectory,
+; поэтому запись туда должна быть разрешена
+ReadWritePaths=/opt/aida/data
+
+; Базовая изоляция
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

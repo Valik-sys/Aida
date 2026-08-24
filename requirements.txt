@@ -1,0 +1,23 @@
+aiogram>=3.10.0,<4.0.0
+openai>=1.40.0,<2.0.0
+
+# RAG / LangChain
+langchain>=0.3.0,<0.4.0
+langchain-openai>=0.2.0,<0.3.0
+langchain-community>=0.3.0,<0.4.0
+rank-bm25>=0.2.2,<0.3.0
+flashrank>=0.2.0
+faiss-cpu>=1.7.0,<2.0.0
+
+# Google Sheets
+gspread>=6.1.0,<7.0.0
+google-auth>=2.30.0,<3.0.0
+
+# Parsing
+python-docx>=1.1.0,<2.0.0
+
+# Storage / reliability
+aiosqlite>=0.19.0,<0.21.0
+tenacity>=8.2.0,<10.0.0
+python-dotenv>=1.0.0,<2.0.0
+

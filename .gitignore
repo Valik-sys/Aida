@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment & secrets
+.env
+*.json
+!package.json
+
+# Database
+*.sqlite3
+
+# FAISS vectorstore (rebuild on server)
+data/vectorstore/
+
+# Disk cache (sheets + theory, regenerated via /update)
+data/cache/
+
+# Raw data (fetched via scripts)
+data/raw/
+data/formatted_preview.txt
+data/markdown/
+
+# Материалы преподавателей — рабочие данные пользователей, не код
+data/teachers/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Одноразовые скрипты проверок в корне (папка tests/ при этом коммитится)
+/test_*.py
