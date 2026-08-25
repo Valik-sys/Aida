@@ -741,6 +741,39 @@ class TestSectionTicket:
         # Выбор количества никуда не делся
         assert any(b.callback_data == "tests:qty:10" for b in buttons)
 
+    async def test_topic_screen_offers_a_ticket_too(self, screen):
+        """Билет предлагается и после выбора темы, а не только «всего раздела».
+
+        Иначе он то есть, то нет без всякой причины: ученик выбрал тему —
+        и остался с одним лишь количеством вопросов.
+        """
+        th, state, _ = screen
+
+        await th.pick_section(_Stub.Callback("tests:section:6_1", uid=STUDENT), state)
+
+        buttons = [b for row in _Stub.keyboards[-1].inline_keyboard for b in row]
+        ticket = [b for b in buttons if b.callback_data == "tests:secticket:6_1"]
+        assert ticket, "после выбора темы билета не предлагают"
+        assert "теме" in ticket[0].text
+
+    async def test_mixed_pile_offers_a_ticket_too(self, screen):
+        th, state, _ = screen
+
+        await th.pick_section(_Stub.Callback("tests:section:none", uid=STUDENT), state)
+
+        buttons = [b for row in _Stub.keyboards[-1].inline_keyboard for b in row]
+        assert any(b.callback_data == "tests:secticket:none" for b in buttons)
+
+    async def test_ticket_from_a_topic_takes_only_that_topic(self, screen):
+        th, state, _ = screen
+
+        await th.section_ticket(_Stub.Callback("tests:secticket:6_1", uid=STUDENT), state)
+        session = (await state.get_data()).get("test_session") or {}
+
+        assert session["questions"]
+        for q in session["questions"]:
+            assert " 6_1 " in q["question_text"], q["question_text"]
+
     async def test_ticket_is_built_from_that_section_only(self, screen):
         """Вопросы соседнего раздела в билет попасть не должны."""
         th, state, _ = screen

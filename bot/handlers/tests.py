@@ -22,7 +22,7 @@ from bot.keyboards.inline import (
     question_report_kb,
     report_reasons_kb,
     reported_open_kb,
-    section_whole_kb,
+    place_start_kb,
     sections_kb,
     student_topics_kb,
     short_text,
@@ -1244,8 +1244,30 @@ async def pick_section(callback: CallbackQuery, state: FSMContext) -> None:
             await callback.answer()
             return
 
+    await _ask_quantity(callback, state, key)
+
+
+def _place_words(key: str) -> Tuple[str, str]:
+    """Как назвать выбранное место: (подпись билета, о чём вопрос на экране)."""
+    if key == UNSORTED_KEY:
+        return "Билет", "по смешанным вопросам"
+    if sections_lib.is_topic(key):
+        return "Билет по теме", "по этой теме"
+    return "Билет по разделу", "по этому разделу"
+
+
+async def _ask_quantity(callback: CallbackQuery, state: FSMContext, key: str) -> None:
+    """Экран выбора: целый билет или своё количество вопросов.
+
+    Один и тот же для раздела, темы и «Смешанных вопросов» — иначе билет
+    оказывался бы то доступен, то нет без всякой причины.
+    """
     await state.update_data(test_filter_type="section", test_filter_value=key, test_qty=None)
-    await callback.message.edit_text("Сколько вопросов нужно?", reply_markup=quantity_kb())
+    ticket_text, about = _place_words(key)
+    await callback.message.edit_text(
+        f"Как тренируемся {about}?",
+        reply_markup=place_start_kb(key, TICKET_PART_A + TICKET_PART_B, ticket_text),
+    )
     await callback.answer()
 
 
@@ -1291,12 +1313,7 @@ async def pick_section_whole(callback: CallbackQuery, state: FSMContext) -> None
     if not key:
         await callback.answer()
         return
-    await state.update_data(test_filter_type="section", test_filter_value=key, test_qty=None)
-    await callback.message.edit_text(
-        "Как тренируемся по этому разделу?",
-        reply_markup=section_whole_kb(key, TICKET_PART_A + TICKET_PART_B),
-    )
-    await callback.answer()
+    await _ask_quantity(callback, state, key)
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("tests:variant_idx:"))  # type: ignore[call-arg]

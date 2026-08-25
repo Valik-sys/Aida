@@ -465,18 +465,22 @@ def student_topics_kb(topics: Sequence, section_key: str) -> InlineKeyboardMarku
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def section_whole_kb(section_key: str, ticket_size: int) -> InlineKeyboardMarkup:
-    """Что делать с целым разделом: билет или своё количество вопросов.
+def place_start_kb(key: str, ticket_size: int, ticket_text: str) -> InlineKeyboardMarkup:
+    """Что делать с выбранным местом: билет или своё количество вопросов.
 
-    Билет стоит первым: после разбора темы на занятии смысл прогнать целый
-    билет по разделу больше, чем пять случайных вопросов. Кнопки количества
-    те же, что на обычном экране, — состояние уже выставлено на этот раздел.
+    Одна клавиатура на раздел, тему и «Смешанные вопросы»: разница между
+    ними только в подписи билета, а выбор всюду один и тот же. Билет стоит
+    первым — после разбора темы на занятии прогнать целый билет осмысленнее,
+    чем пять случайных вопросов.
+
+    Кнопки количества те же, что на обычном экране: состояние уже выставлено
+    на это место, и им не нужно ничего знать о нём.
     """
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(
-                text=f"🎯 Билет по разделу · {ticket_size} вопросов",
-                callback_data=f"tests:secticket:{section_key}",
+                text=f"🎯 {ticket_text} · {ticket_size} вопросов",
+                callback_data=f"tests:secticket:{key}",
             )],
             [
                 InlineKeyboardButton(text="5", callback_data="tests:qty:5"),
