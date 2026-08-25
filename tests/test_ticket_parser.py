@@ -153,6 +153,51 @@ class TestAnswersHeader:
         questions, _a = self._answer_of("Ответы к тесту")
         assert len(questions) == 1
 
+    def test_unusual_header_still_finds_the_key(self):
+        """Запасной путь: ключ ищется по форме строки, а не по подписи.
+
+        Перечислять все написания заголовка бесполезно — преподаватель
+        напишет «Эталоны» или «Ключ к варианту 3». Сама строка ключа при
+        этом выглядит одинаково всегда.
+        """
+        for header in ("Эталоны", "Верные варианты", "Ключ к варианту 3"):
+            lines = [
+                "Часть А",
+                "А1. Кто основал город и при каком князе это произошло?",
+                "1) Рогволод", "2) Всеслав", "3) Изяслав", "4) Брячислав",
+                header,
+                "Часть А: А1 — 2; А2 — 3",
+            ]
+            _questions, answers_a, _ = ticket_parser.parse_lines(lines)
+            assert answers_a == {"А1": "2", "А2": "3"}, header
+
+    def test_key_without_any_header_is_found(self):
+        lines = [
+            "Часть А",
+            "А1. Кто основал город и при каком князе это произошло?",
+            "1) Рогволод", "2) Всеслав", "3) Изяслав", "4) Брячислав",
+            "Часть А: А1 — 2; А2 — 3",
+        ]
+        questions, answers_a, _ = ticket_parser.parse_lines(lines)
+
+        assert answers_a == {"А1": "2", "А2": "3"}
+        # Строка ключа не должна съесть вопрос, стоящий выше
+        assert len(questions) == 1
+
+    def test_question_text_is_not_mistaken_for_a_key(self):
+        """Одна пара «А1 —» встречается и в тексте: «задание А1 — простое».
+
+        Отсюда цена страховки: ключ без заголовка находится начиная с двух
+        ответов. Билет с одним-единственным вопросом придётся подписать —
+        но таких билетов не бывает, а ложный ключ обрубил бы настоящий.
+        """
+        assert not ticket_parser.looks_like_answer_key(
+            "Задание А1 — самое простое в этой части"
+        )
+        assert not ticket_parser.looks_like_answer_key("1) Рогволод 2) Всеслав")
+        assert ticket_parser.looks_like_answer_key("Часть А: А1 — 2; А2 — 3")
+        assert ticket_parser.looks_like_answer_key("В1 — 1453; В2 — шляхта")
+
     def test_long_sentence_is_not_a_header(self):
         """Иначе «Ответы записывайте в бланк…» обрубало бы весь билет."""
         long_line = (

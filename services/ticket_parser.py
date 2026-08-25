@@ -178,6 +178,32 @@ def _extract_part_block(text: str, part_chars: str) -> str:
     return (m.group(1) if m else "").strip()
 
 
+# Пара «маркер — ответ»: «А1 — 2», «B7 — А3Б2В1», «В1 — 1453».
+# Именно по ней узнаётся строка ключа, когда заголовка нет или он назван
+# непривычно. Требуется тире или двоеточие после номера — без этого под
+# описание попал бы любой вариант ответа вида «1) Рогволод».
+_answer_pair_re = re.compile(
+    rf"[{_PART_A_CHARS}{_PART_B_CHARS}]\s*\d{{1,2}}\s*[-–—:]\s*\S",
+    re.IGNORECASE,
+)
+
+# Сколько пар должно быть в строке, чтобы считать её ключом. Одна пара
+# встречается в тексте вопроса («задание А1 — самое простое»), две подряд —
+# уже не случайность.
+_MIN_PAIRS_IN_KEY = 2
+
+
+def looks_like_answer_key(line: str) -> bool:
+    """Похожа ли строка на ключ с ответами — по форме, а не по заголовку.
+
+    Запасной путь: заголовок ключа пишут как угодно («Эталоны», «Верные
+    варианты», «Ключ к варианту 3»), и перечислять все написания бесполезно.
+    А вот сама строка ключа выглядит одинаково всегда: маркер, тире, ответ,
+    и так несколько раз подряд.
+    """
+    return len(_answer_pair_re.findall(line or "")) >= _MIN_PAIRS_IN_KEY
+
+
 def _parse_answers(answer_lines: List[str]) -> Tuple[Dict[str, str], Dict[str, str]]:
     text = "\n".join(answer_lines)
 
@@ -313,6 +339,17 @@ def parse_lines(
         answers_idx = i
         answers_head = tail
         break
+
+    # Заголовка нет или он назван непривычно — ищем сам ключ по форме строки.
+    # Перечислять все написания заголовка бесполезно, а строка ключа выглядит
+    # одинаково всегда. Строка ключа остаётся в блоке ответов целиком: она
+    # и есть ответы, а не подпись над ними.
+    if answers_idx is None:
+        for i, t in enumerate(paragraphs):
+            if looks_like_answer_key(t):
+                answers_idx = i
+                answers_head = t
+                break
 
     if answers_idx is None:
         main_lines = paragraphs[::]
