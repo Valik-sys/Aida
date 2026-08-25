@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from services import ticket_parser  # noqa: E402
 from services.ticket_parser import (  # noqa: E402
     ParsedQuestion,
     REASON_BAD_ANSWER,
@@ -37,6 +38,21 @@ class TestNormalizeExpected:
         assert _normalize_expected("1900") == "1900"
         assert _normalize_expected("1569") == "1569"
 
+    def test_year_made_of_small_digits_is_still_a_year(self):
+        """Найдено на живом билете: «1453» превращалось в «1345».
+
+        Цифры года 1, 4, 5, 3 выглядят ровно как выбор четырёх вариантов,
+        и различить их можно только по длине и диапазону.
+        """
+        assert _normalize_expected("1453") == "1453"
+        assert _normalize_expected("1234") == "1234"
+        assert _normalize_expected("2345") == "2345"
+
+    def test_descending_multiselect_is_still_sorted(self):
+        """Проверка года не должна выключать сортировку многовыбора."""
+        assert _normalize_expected("5421") == "1245"
+        assert _normalize_expected("321") == "123"
+
     def test_repeated_digits_are_not_multiselect(self):
         assert _normalize_expected("1122") == "1122"
 
@@ -52,6 +68,16 @@ class TestNormalizeExpected:
         assert _normalize_expected("Метрополия") == "Метрополия"
         assert _normalize_expected("Сарматизм") == "Сарматизм"
         assert _normalize_expected("Волока;") == "Волока"
+
+    def test_spaces_inside_a_word_answer_are_kept(self):
+        """Найдено на живом билете: «Золотая Орда» склеивалось в одно слово."""
+        assert _normalize_expected("Золотая Орда") == "Золотая Орда"
+        assert _normalize_expected("магдебургское  право") == "магдебургское право"
+
+    def test_spaces_between_parts_of_one_answer_are_removed(self):
+        """А в соответствии пробел — только разделитель, его убираем."""
+        assert _normalize_expected("А4 Б1 В2 Г3") == "А4Б1В2Г3"
+        assert _normalize_expected("Б Г А В") == "БГАВ"
 
     def test_empty(self):
         assert _normalize_expected("") == ""
@@ -85,6 +111,59 @@ class TestParseAnswers:
     def test_no_answers_block(self):
         a, b = _parse_answers(["Просто текст без ключа"])
         assert a == {} and b == {}
+
+
+class TestAnswersHeader:
+    """Как подписан ключ в файле.
+
+    Найдено на живом билете: заголовок «Ответы к тесту» не опознавался,
+    и файл с 34 готовыми вопросами отвергался как «без ключа».
+    """
+
+    def _ticket(self, header: str):
+        return [
+            "Часть А",
+            "А1. Кто основал город и при каком князе это произошло?",
+            "1) Рогволод", "2) Всеслав", "3) Изяслав", "4) Брячислав",
+            header,
+            "Часть А: А1 — 2",
+        ]
+
+    def _answer_of(self, header: str):
+        questions, answers_a, _ = ticket_parser.parse_lines(self._ticket(header))
+        return questions, answers_a
+
+    def test_plain_header(self):
+        _q, a = self._answer_of("Ответы")
+        assert a == {"А1": "2"}
+
+    def test_header_with_a_tail(self):
+        for header in ("Ответы к тесту", "Ответы на задания", "Правильные ответы"):
+            _q, a = self._answer_of(header)
+            assert a == {"А1": "2"}, header
+
+    def test_key_written_on_one_line(self):
+        """«Ответы: А1 — 2» одной строкой: раньше ключ терялся целиком."""
+        lines = self._ticket("Ответы: А1 — 2")[:-1]
+        _questions, answers_a, _ = ticket_parser.parse_lines(lines)
+        assert answers_a == {"А1": "2"}
+
+    def test_questions_stay_above_the_key(self):
+        """Заголовок отрезает вопросы от ключа, а не съедает их."""
+        questions, _a = self._answer_of("Ответы к тесту")
+        assert len(questions) == 1
+
+    def test_long_sentence_is_not_a_header(self):
+        """Иначе «Ответы записывайте в бланк…» обрубало бы весь билет."""
+        long_line = (
+            "Ответы записывайте в бланк ответов печатными буквами, "
+            "начиная с первой клетки, не выходя за её границы, и следите "
+            "за тем, чтобы номер задания в бланке совпадал с номером "
+            "задания в тексте работы, иначе ответ не будет засчитан вовсе"
+        )
+        lines = ["Часть А", "А1. Вопрос про историю?", "1) раз", "2) два", long_line]
+        _questions, answers_a, answers_b = ticket_parser.parse_lines(lines)
+        assert answers_a == {} and answers_b == {}
 
 
 def _q(text="Вопрос про историю Беларуси", options=None, expected="1", part="А"):

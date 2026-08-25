@@ -27,9 +27,11 @@ logger = logging.getLogger(__name__)
 
 # Версия парсера пишется в манифест. При изменении логики разбора поднять —
 # тогда видно, какие файлы разобраны устаревшей версией и требуют перепрогона.
-# 2 — добавлено чтение PDF с текстовым слоем. Разбор .docx не изменился,
-# поэтому пересобирать накопленное ради версии не требуется.
-PARSER_VERSION = 2
+# 2 — чтение PDF с текстовым слоем.
+# 3 — заголовок ключа не обязан быть словом «Ответы» в одиночку, год больше
+#     не сортируется как многовыбор, пробелы в словесном ответе сохраняются.
+#     Накопленное стоит перегнать через /reparse: разбор изменился.
+PARSER_VERSION = 3
 
 # Схема строки — та же, что в таблице тестов проекта. Менять нельзя:
 # на неё завязаны хендлеры тестов.
@@ -41,7 +43,22 @@ COLS = [
 
 # А/В — кириллица, A/B — латиница (бывает в docx)
 _question_marker_re = re.compile(r"^\s*([АВABаваb])\s*(\d+)\s*[.\)]\s*(.*)$")
-_answers_header_re = re.compile(r"^\s*ответы\s*[:\-–—]?\s*$", re.IGNORECASE)
+# Заголовок ключа. Пишут его по-разному: «Ответы», «Ответы к тесту»,
+# «Правильные ответы», «Ключ», иногда сразу с ответами в той же строке
+# («Ответы: А1 — 2; А2 — 3»). Хвост забирается отдельно, иначе ключ,
+# записанный одной строкой, терялся бы целиком.
+#
+# Длина хвоста ограничена: без ограничения заголовком становилась бы любая
+# фраза вроде «Ответы записывайте в бланк ответов печатными буквами», и
+# всё, что ниже, парсер счёл бы ключом.
+_ANSWERS_TAIL_LIMIT = 200
+
+_answers_header_re = re.compile(
+    r"^\s*(?:правильные\s+|верные\s+)?(?:ответы|ключ(?:\s+ответов)?)"
+    r"(?:\s+(?:к|на|для)\s+\S+)?"
+    r"\s*[:\-–—]?\s*(?P<tail>.*)$",
+    re.IGNORECASE,
+)
 # Колонтитулы страниц: "Вариант 1  1"
 _page_header_re = re.compile(r"^Вариант\s+\d+\s+\d+$", re.IGNORECASE)
 _part_boundary_re = re.compile(r"^\s*Часть\s+[АБВАВB]\s*$", re.IGNORECASE)
@@ -91,24 +108,9 @@ def _iter_docx_paragraphs_raw(docx_path: Path) -> List[str]:
 
 # ---------- Ключ с ответами ----------
 
-def _normalize_part_b_expected(raw: str) -> str:
-    s = (raw or "").strip().upper()
-    s = s.replace(" ", " ")
-    s = re.sub(r"\s+", "", s)
-    s = s.translate(_latin_to_cyr)
-    s = re.sub(r"[^АБВГ0-9]", "", s)
-    if not s:
-        return ""
-
-    only_digits = bool(re.fullmatch(r"\d+", s))
-    only_letters = bool(re.fullmatch(r"[АБВГ]+", s))
-
-    if only_digits:
-        digits = sorted(set(s), key=lambda x: int(x))
-        return "".join(digits)
-    if only_letters:
-        return s
-    return s
+# Границы года. Всё, что похоже на год, сортировать нельзя ни при каких
+# условиях: «1453» — дата падения Константинополя, а не выбор вариантов.
+_YEAR_MIN, _YEAR_MAX = 1000, 2099
 
 
 def _normalize_expected(raw: str) -> str:
@@ -119,29 +121,37 @@ def _normalize_expected(raw: str) -> str:
       • последовательность/соответствие «БГВА», «А2Б3В1Г4» — порядок важен;
       • словесный ответ или год «Метрополия», «1795» — оставляем как есть.
 
-    Прежняя версия считала многовыбором любые цифры, из-за чего год 1795
-    превращался в 1579, а словесные ответы вычищались в пустую строку.
+    **Год проверяется первым.** Раньше многовыбором считались любые цифры
+    из 1–5, и год «1453» превращался в «1345»: его цифры выглядят точно так
+    же, как выбор вариантов 1, 4, 5 и 3. Различить их по самим цифрам нельзя,
+    а по длине и диапазону — можно. Многовыбор, записанный по возрастанию,
+    от сортировки не меняется, поэтому четырёхзначный выбор от этой проверки
+    не страдает.
     """
-    s = (raw or "").strip()
-    s = s.replace("\xa0", " ")
-    s = re.sub(r"\s+", "", s)
-    s = s.strip(".,;:")
+    s = (raw or "").replace("\xa0", " ").strip()
+    s = re.sub(r"\s+", " ", s).strip(" .,;:")
     if not s:
         return ""
 
-    upper = s.upper().translate(_latin_to_cyr)
+    # Пробелы убираем только там, где они разделяют части одного ответа
+    # («А2 Б3 В1» → «А2Б3В1»). В словесном ответе пробел — часть текста:
+    # «Золотая Орда» не должна склеиться в «ЗолотаяОрда».
+    compact = re.sub(r"\s+", "", s)
+    upper = compact.upper().translate(_latin_to_cyr)
 
     if re.fullmatch(r"\d+", upper):
-        # Многовыбор — только цифры вариантов 1–5 без повторов.
-        # Годы и прочие числа оставляем нетронутыми.
+        if len(upper) == 4 and _YEAR_MIN <= int(upper) <= _YEAR_MAX:
+            return compact
+
+        # Многовыбор — цифры вариантов без повторов
         digits = list(upper)
         if (
-            len(digits) <= 5
+            2 <= len(digits) <= 6
             and len(set(digits)) == len(digits)
-            and all(d in "12345" for d in digits)
+            and all(d in "123456" for d in digits)
         ):
             return "".join(sorted(digits, key=int))
-        return s
+        return compact
 
     if re.fullmatch(r"[АБВГД]+", upper):
         return upper
@@ -292,10 +302,17 @@ def parse_lines(
     paragraphs = [re.sub(r"\t+", " ", t) for t in paragraphs_raw]
 
     answers_idx: Optional[int] = None
+    answers_head = ""
     for i, t in enumerate(paragraphs):
-        if _answers_header_re.match(t):
-            answers_idx = i
-            break
+        match = _answers_header_re.match(t)
+        if not match:
+            continue
+        tail = (match.group("tail") or "").strip()
+        if len(tail) > _ANSWERS_TAIL_LIMIT:
+            continue
+        answers_idx = i
+        answers_head = tail
+        break
 
     if answers_idx is None:
         main_lines = paragraphs[::]
@@ -305,7 +322,10 @@ def parse_lines(
     else:
         main_lines = paragraphs[:answers_idx]
         main_lines_raw = paragraphs_raw[:answers_idx]
-        answers_a, answers_b = _parse_answers(paragraphs[answers_idx + 1:])
+        rest = paragraphs[answers_idx + 1:]
+        answers_a, answers_b = _parse_answers(
+            ([answers_head] if answers_head else []) + rest
+        )
 
     questions: List[ParsedQuestion] = []
     current_part: Optional[str] = None
