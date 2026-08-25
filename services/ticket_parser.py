@@ -20,12 +20,16 @@ from typing import Dict, List, Optional, Tuple
 
 from docx import Document
 
+from services import pdf_tools
+
 
 logger = logging.getLogger(__name__)
 
 # Версия парсера пишется в манифест. При изменении логики разбора поднять —
 # тогда видно, какие файлы разобраны устаревшей версией и требуют перепрогона.
-PARSER_VERSION = 1
+# 2 — добавлено чтение PDF с текстовым слоем. Разбор .docx не изменился,
+# поэтому пересобирать накопленное ради версии не требуется.
+PARSER_VERSION = 2
 
 # Схема строки — та же, что в таблице тестов проекта. Менять нельзя:
 # на неё завязаны хендлеры тестов.
@@ -272,8 +276,19 @@ def _extract_options_from_lines(lines: List[str]) -> Tuple[str, List[str]]:
 
 
 def parse_paragraphs(docx_path: Path) -> Tuple[List[ParsedQuestion], Dict[str, str], Dict[str, str]]:
-    """Основной разбор: вопросы идут абзацами, ключ — после заголовка «Ответы»."""
-    paragraphs_raw = _iter_docx_paragraphs_raw(docx_path)
+    """Основной разбор .docx: вопросы идут абзацами, ключ — после «Ответы»."""
+    return parse_lines(_iter_docx_paragraphs_raw(docx_path))
+
+
+def parse_lines(
+    paragraphs_raw: List[str],
+) -> Tuple[List[ParsedQuestion], Dict[str, str], Dict[str, str]]:
+    """Разбор готовых строк: вопросы идут абзацами, ключ — после «Ответы».
+
+    Отдельно от чтения файла намеренно: строки одинаково приходят из .docx
+    и из PDF, и второй парсер для второго формата заводить незачем — иначе
+    любая правка разбора чинилась бы дважды.
+    """
     paragraphs = [re.sub(r"\t+", " ", t) for t in paragraphs_raw]
 
     answers_idx: Optional[int] = None
@@ -583,10 +598,23 @@ class ParseResult:
 
 
 def parse_docx(path: Path, variant: Optional[str] = None) -> ParseResult:
-    """Разбирает один файл. Сначала абзацами, при неудаче — таблицами."""
+    """Разбирает один файл — .docx или PDF с текстом.
+
+    Имя оставлено прежним: на него завязаны скрипты и вызовы в боте, а
+    формат определяется по расширению, а не по названию функции.
+
+    Разбор таблицами — запасной путь для формата обобщений, и он есть
+    только у .docx: в PDF таблица это те же строки текста, их разбирает
+    основной путь.
+    """
     path = Path(path)
     variant = variant or path.stem
     result = ParseResult(variant=variant)
+
+    if pdf_tools.is_pdf_name(path.name):
+        questions, _a, _b = parse_lines(pdf_tools.extract_lines(path))
+        source = "pdf" if questions else "none"
+        return _finish(result, questions, source, variant, path)
 
     questions, _a, _b = parse_paragraphs(path)
     source = "paragraphs"
@@ -594,6 +622,18 @@ def parse_docx(path: Path, variant: Optional[str] = None) -> ParseResult:
     if not questions:
         questions = parse_tables(path)
         source = "tables" if questions else "none"
+
+    return _finish(result, questions, source, variant, path)
+
+
+def _finish(
+    result: ParseResult,
+    questions: List[ParsedQuestion],
+    source: str,
+    variant: str,
+    path: Path,
+) -> ParseResult:
+    """Фильтр качества и сборка строк — общая для всех форматов."""
 
     result.source = source
 
@@ -610,7 +650,7 @@ def parse_docx(path: Path, variant: Optional[str] = None) -> ParseResult:
             result.rows.append(to_row(q, variant))
 
     logger.info(
-        "parse_docx %s: источник=%s принято=%d отбраковано=%d",
+        "parse %s: источник=%s принято=%d отбраковано=%d",
         path.name, source, result.accepted_count, result.rejected_count,
     )
     return result

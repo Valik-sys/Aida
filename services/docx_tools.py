@@ -41,6 +41,25 @@ def is_docx_name(filename: str) -> bool:
     return (filename or "").lower().endswith(".docx")
 
 
+# Форматы, которые бот берёт у преподавателя. PDF читается, только если
+# в нём есть текст: скан — это картинки страниц, и распознавать их бот
+# пока не умеет (см. services/pdf_tools.py).
+SUPPORTED_SUFFIXES = (".docx", ".pdf")
+
+
+def is_supported_name(filename: str) -> bool:
+    return (filename or "").lower().endswith(SUPPORTED_SUFFIXES)
+
+
+def suffix_of(filename: str) -> str:
+    """Расширение в нижнем регистре, с точкой. Пустая строка — если чужое."""
+    lowered = (filename or "").lower()
+    for suffix in SUPPORTED_SUFFIXES:
+        if lowered.endswith(suffix):
+            return suffix
+    return ""
+
+
 def strip_media(src: Path, dst: Path) -> Tuple[int, int]:
     """Пересобирает .docx без картинок. Возвращает (было_байт, стало_байт)."""
     size_before = src.stat().st_size
@@ -123,6 +142,16 @@ def safe_stem(filename: str) -> str:
 
 
 def list_uploads(uploads_dir: Path) -> List[Path]:
+    """Все файлы преподавателя, которые бот умеет разбирать.
+
+    Сортировка по имени, а не по расширению: порядок разбора должен быть
+    один и тот же от пересборки к пересборке, иначе номера вопросов
+    поедут при каждом /reparse.
+    """
     if not uploads_dir.exists():
         return []
-    return sorted(uploads_dir.glob("*.docx"))
+    files = [
+        p for p in uploads_dir.iterdir()
+        if p.is_file() and is_supported_name(p.name)
+    ]
+    return sorted(files, key=lambda p: p.name)

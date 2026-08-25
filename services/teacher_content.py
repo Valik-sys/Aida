@@ -433,12 +433,24 @@ def counts_by_section(tg_id: int, subject: str) -> Dict[str, int]:
 
 
 def store_upload(tg_id: int, subject: str, tmp_path: Path, original_name: str) -> tuple[Path, int, int]:
-    """Кладёт файл в uploads/, вычистив картинки. Возвращает (путь, было, стало)."""
+    """Кладёт файл в uploads/, вычистив картинки. Возвращает (путь, было, стало).
+
+    Картинки вычищаются только из .docx: там это 94% веса, а разбор от них
+    не зависит. PDF кладётся как есть — вынуть из него картинки, не сломав
+    страницы, нельзя, а текст в нём и так лежит отдельно от изображений.
+    """
     uploads_dir = storage.teacher_uploads_dir(tg_id, subject)
     uploads_dir.mkdir(parents=True, exist_ok=True)
-    target = uploads_dir / f"{docx_tools.safe_stem(original_name)}.docx"
-    before, after = docx_tools.strip_media(tmp_path, target)
-    return target, before, after
+    suffix = docx_tools.suffix_of(original_name) or ".docx"
+    target = uploads_dir / f"{docx_tools.safe_stem(original_name)}{suffix}"
+
+    if suffix == ".docx":
+        before, after = docx_tools.strip_media(tmp_path, target)
+        return target, before, after
+
+    size = tmp_path.stat().st_size
+    target.write_bytes(tmp_path.read_bytes())
+    return target, size, size
 
 
 def delete_upload(tg_id: int, subject: str, filename: str) -> bool:

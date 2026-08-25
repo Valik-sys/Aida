@@ -1,4 +1,4 @@
-"""Загрузка билетов преподавателем: приём .docx → разбор → тренажёр."""
+"""Загрузка билетов преподавателем: приём файла → разбор → тренажёр."""
 
 from __future__ import annotations
 
@@ -31,7 +31,13 @@ from bot.keyboards.inline import (
 from bot.states.states import TeacherUpload
 from database.db import get_user, set_teacher_content
 from database.models import ROLE_TEACHER
-from services import docx_tools, sections as sections_lib, storage, teacher_content
+from services import (
+    docx_tools,
+    pdf_tools,
+    sections as sections_lib,
+    storage,
+    teacher_content,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -41,7 +47,8 @@ router = Router()
 
 UPLOAD_PROMPT = (
     "📥 Добавить вопросы\n\n"
-    "Пришлите файл .docx со своими билетами — я разберу его и соберу тренажёр.\n\n"
+    "Пришлите файл .docx или PDF со своими билетами — я разберу его\n"
+    "и соберу тренажёр.\n\n"
     "Важно: в файле должен быть ключ с ответами — блок «Ответы» в конце, "
     "например «Часть А: А1 — 2; А2 — 3…».\n"
     "Без ключа я не смогу проверять ответы учеников.\n\n"
@@ -239,15 +246,19 @@ async def handle_document(message: Message, state: FSMContext) -> None:
         return
 
     doc = message.document
-    if not docx_tools.is_docx_name(doc.file_name or ""):
-        await message.answer("Нужен файл в формате .docx. Другие форматы пока не поддерживаются.")
+    if not docx_tools.is_supported_name(doc.file_name or ""):
+        await message.answer(
+            "Нужен файл .docx или PDF с текстом.\n"
+            "Фотографии и сканы бот пока не распознаёт."
+        )
         return
 
     if (doc.file_size or 0) > docx_tools.MAX_UPLOAD_BYTES:
         await message.answer(
             f"Файл слишком большой ({doc.file_size / 1e6:.1f} МБ). "
             f"Telegram отдаёт ботам файлы до {docx_tools.MAX_UPLOAD_BYTES // (1024 * 1024)} МБ.\n"
-            "Обычно вес дают картинки — попробуйте сохранить документ без иллюстраций."
+            "Обычно вес дают картинки — попробуйте сохранить документ без "
+            "иллюстраций или разделить его на части."
         )
         return
 
@@ -261,7 +272,7 @@ async def handle_document(message: Message, state: FSMContext) -> None:
     status = await message.answer("⏳ Читаю файл…")
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="aida_upload_"))
-    tmp_path = tmp_dir / "incoming.docx"
+    tmp_path = tmp_dir / f"incoming{docx_tools.suffix_of(doc.file_name or '') or '.docx'}"
 
     try:
         await message.bot.download(doc, destination=tmp_path)
@@ -318,7 +329,7 @@ async def handle_document(message: Message, state: FSMContext) -> None:
                 ),
             )
 
-    except docx_tools.DocxError as exc:
+    except (docx_tools.DocxError, pdf_tools.PdfError) as exc:
         await status.delete()
         await message.answer(f"Не смог прочитать файл: {exc}")
     except Exception:  # noqa: BLE001
@@ -677,7 +688,7 @@ async def _apply_place(
         await _show(
             message,
             f"Куда: {label}\n\n"
-            "Пришлите файл .docx — всё, что в нём найдётся, попадёт сюда.\n"
+            "Пришлите файл .docx или PDF — всё, что в нём найдётся, попадёт сюда.\n"
             "Можно прислать несколько файлов подряд."
         )
         return
@@ -764,7 +775,7 @@ async def waiting_file_hint(message: Message, state: FSMContext) -> None:
     ожидания было бы не выйти: он перехватывал бы вообще всё.
     """
     await message.answer(
-        "Жду файл .docx с билетами.\n"
+        "Жду файл с билетами — .docx или PDF.\n"
         "Чтобы выйти — нажмите любую кнопку меню или отправьте /menu.",
     )
 

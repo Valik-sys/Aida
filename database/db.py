@@ -868,7 +868,10 @@ async def prune_answer_log(days: int = ANSWER_LOG_KEEP_DAYS) -> int:
     """Удаляет старые записи журнала. Счётчики не трогает."""
     cutoff = (_utcnow() - dt.timedelta(days=days)).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("DELETE FROM answer_log WHERE answered_at < ?", (cutoff,))
+        # Ровно на границе — тоже старая: часы тикают крупнее, чем идут
+        # записи, и при строгом сравнении запись, попавшая в тот же тик,
+        # что и чистка, оставалась бы висеть до следующего раза
+        cursor = await db.execute("DELETE FROM answer_log WHERE answered_at <= ?", (cutoff,))
         await db.commit()
         return cursor.rowcount or 0
 
