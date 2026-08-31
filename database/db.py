@@ -864,6 +864,53 @@ async def get_teacher_totals(teacher_id: int, subject: str = "") -> Dict[str, in
     }
 
 
+async def get_answer_log(
+    user_ids: Sequence[int],
+    subject: str = "",
+    days: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Записи журнала ответов — для выгрузки в файл.
+
+    Журнал чистится по возрасту (`ANSWER_LOG_KEEP_DAYS`), поэтому глубже
+    этого срока выгрузки не будет: считать проценты задним числом не из чего.
+    """
+    if not user_ids:
+        return []
+
+    placeholders = ",".join("?" for _ in user_ids)
+    where = [f"user_id IN ({placeholders})"]
+    params: List[Any] = list(user_ids)
+
+    if subject:
+        where.append("subject = ?")
+        params.append(subject)
+    if days is not None:
+        where.append("answered_at >= ?")
+        params.append((_utcnow() - dt.timedelta(days=days)).isoformat())
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            f"""
+            SELECT user_id, question_hash, is_correct, answered_at
+            FROM answer_log
+            WHERE {' AND '.join(where)}
+            ORDER BY answered_at
+            """,
+            params,
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+    return [
+        {
+            "user_id": r[0],
+            "question_hash": r[1],
+            "is_correct": bool(r[2]),
+            "answered_at": r[3],
+        }
+        for r in rows
+    ]
+
+
 async def prune_answer_log(days: int = ANSWER_LOG_KEEP_DAYS) -> int:
     """Удаляет старые записи журнала. Счётчики не трогает."""
     cutoff = (_utcnow() - dt.timedelta(days=days)).isoformat()

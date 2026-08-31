@@ -350,7 +350,21 @@ def students_kb(students: Sequence, page: int = 0) -> InlineKeyboardMarkup:
             nav.append(InlineKeyboardButton(text="▶", callback_data=f"students:page:{page + 1}"))
         rows.append(nav)
 
+    if total:
+        rows.append([InlineKeyboardButton(
+            text="📄 Журнал файлом", callback_data="students:journal"
+        )])
+
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def journal_kb() -> InlineKeyboardMarkup:
+    """Выгрузка своего журнала — под экраном прогресса ученика."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📄 Журнал файлом", callback_data="progress:journal")]
+        ]
+    )
 
 
 def student_card_kb(page: int = 0) -> InlineKeyboardMarkup:

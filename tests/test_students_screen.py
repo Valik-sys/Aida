@@ -83,6 +83,17 @@ class TestActivity:
         assert not _is_active(User(telegram_id=1, last_active_at=_utcnow() - dt.timedelta(days=10)))
 
 
+
+def _student_buttons(keyboard) -> list:
+    """Только кнопки учеников: в клавиатуре есть ещё листалка и журнал."""
+    return [
+        b.text
+        for row in keyboard.inline_keyboard
+        for b in row
+        if (b.callback_data or "").startswith("student:")
+    ]
+
+
 class TestStudentsList:
     async def test_button_per_student(self, env):
         await _teacher(TEACHER_A)
@@ -90,8 +101,7 @@ class TestStudentsList:
         await _student(STUDENT_2, TEACHER_A, "Оля")
 
         students = await db_module.get_teacher_students(TEACHER_A)
-        texts = [b.text for row in students_kb(students).inline_keyboard for b in row]
-        assert texts == ["Ваня", "Оля"]
+        assert _student_buttons(students_kb(students)) == ["Ваня", "Оля"]
 
     async def test_student_without_name_still_has_button(self, env):
         await _teacher(TEACHER_A)
@@ -99,8 +109,7 @@ class TestStudentsList:
         await db_module.bind_student(STUDENT_1, TEACHER_A, SUBJECT)
 
         students = await db_module.get_teacher_students(TEACHER_A)
-        texts = [b.text for row in students_kb(students).inline_keyboard for b in row]
-        assert texts == [f"Ученик {STUDENT_1}"]
+        assert _student_buttons(students_kb(students)) == [f"Ученик {STUDENT_1}"]
 
     async def test_empty_list_gives_empty_keyboard(self, env):
         await _teacher(TEACHER_A)
@@ -129,7 +138,8 @@ class TestPagination:
     def test_no_navigation_when_everyone_fits(self):
         kb = students_kb(self._many(STUDENTS_PAGE_SIZE))
         assert "▶" not in self._texts(kb)
-        assert len(kb.inline_keyboard) == STUDENTS_PAGE_SIZE
+        # Строки учеников плюс одна на выгрузку журнала
+        assert len(kb.inline_keyboard) == STUDENTS_PAGE_SIZE + 1
 
     def test_first_page_has_only_forward(self):
         texts = self._texts(students_kb(self._many(19), page=0))
@@ -148,9 +158,7 @@ class TestPagination:
         students = self._many(19)
         seen: list[str] = []
         for page in range(3):
-            rows = students_kb(students, page).inline_keyboard
-            seen += [r[0].text for r in rows if not r[0].callback_data.startswith("students:page")
-                     and r[0].callback_data != "noop"]
+            seen += _student_buttons(students_kb(students, page))
         assert seen == [s.name for s in students]
 
     def test_out_of_range_page_is_clamped(self):

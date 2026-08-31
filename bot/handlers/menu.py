@@ -6,7 +6,7 @@ from typing import List, Optional, Sequence
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 import config
 import subjects as subjects_cfg
@@ -26,6 +26,7 @@ from bot.keyboards.inline import (
     MENU_BTN_UPLOAD,
     REPORT_CARD_PREFIX,
     back_to_mode_kb,
+    journal_kb,
     back_to_trainer_kb,
     flashcards_root_kb,
     main_menu_kb,
@@ -48,7 +49,9 @@ from bot.keyboards.inline import (
 from bot.handlers.start import invite_link
 from bot.states.states import ChatFlow
 from database.db import (
+    ANSWER_LOG_KEEP_DAYS,
     clear_question_reports,
+    get_answer_log,
     count_due,
     count_mistakes,
     ensure_teacher,
@@ -70,6 +73,7 @@ from rag.indexer import build_vectorstore
 from rag.retriever import reset_retriever_cache
 from services import (
     content_provider,
+    journal,
     reports as reports_lib,
     sections as sections_lib,
     storage,
@@ -436,7 +440,99 @@ async def menu_progress(message: Message, state: FSMContext) -> None:
     if due:
         lines.append(f"\n🔁 К повторению сегодня: {due}")
 
-    await message.answer("\n".join(lines))
+    await message.answer("\n".join(lines), reply_markup=journal_kb())
+
+
+# ---------- Журнал файлом ----------
+
+async def _send_journal(
+    message: Message,
+    user_ids: list[int],
+    subject: str,
+    teacher_id: int | None,
+    with_student: bool,
+    prefix: str,
+) -> None:
+    """Собирает журнал и присылает файлом.
+
+    Тему берём из строк тренажёра того преподавателя, чьи это ученики:
+    в записи об ответе лежит только отпечаток вопроса, а место живёт
+    в контенте — так тема остаётся верной и у старых ответов.
+    """
+    entries = await get_answer_log(user_ids, subject=subject)
+    if not entries:
+        await message.answer(
+            "Пока нечего выгружать — ответов ещё не было.\n"
+            f"В журнал попадают ответы за последние {ANSWER_LOG_KEEP_DAYS} дней."
+        )
+        return
+
+    rows = teacher_content.load_tests(teacher_id, subject) if teacher_id else []
+    if not rows:
+        rows = list(sheets_cache.base_tests_rows)
+
+    places = journal.place_by_question(rows, question_hash)
+    names = {u.telegram_id: (u.name or f"Ученик {u.telegram_id}") for u in
+             (await get_teacher_students(teacher_id) if with_student and teacher_id else [])}
+
+    entries_rows = journal.build(
+        entries,
+        subject=subject,
+        places=places,
+        names=names,
+        custom_sections=teacher_content.custom_sections(teacher_id, subject) if teacher_id else None,
+        custom_topics=teacher_content.custom_topics(teacher_id, subject) if teacher_id else None,
+    )
+
+    payload = journal.to_csv(entries_rows, with_student=with_student)
+    await message.answer_document(
+        BufferedInputFile(payload, filename=journal.filename(prefix)),
+        caption=(
+            f"Занятий в журнале: {len(entries_rows)}\n"
+            "Открывается в Excel и Google Таблицах."
+        ),
+    )
+
+
+@router.callback_query(F.data == "students:journal")
+async def students_journal(callback: CallbackQuery) -> None:
+    """Журнал по всем ученикам — преподавателю."""
+    teacher_id = callback.from_user.id
+    subject, role, _user = await _user_context(teacher_id)
+    await callback.answer()
+    if role != ROLE_TEACHER:
+        return
+
+    students = await get_teacher_students(teacher_id)
+    if not students:
+        await callback.message.answer("Учеников пока нет.")
+        return
+
+    await _send_journal(
+        callback.message,
+        [s.telegram_id for s in students],
+        subject,
+        teacher_id,
+        with_student=True,
+        prefix="Журнал класса",
+    )
+
+
+@router.callback_query(F.data == "progress:journal")
+async def student_journal(callback: CallbackQuery) -> None:
+    """Свой журнал — ученику."""
+    user_id = callback.from_user.id
+    subject, _role, user = await _user_context(user_id)
+    await callback.answer()
+
+    await _send_journal(
+        callback.message,
+        [user_id],
+        subject,
+        content_provider.resolve_teacher_id(user) if user else None,
+        with_student=False,
+        prefix="Мой журнал",
+    )
 
 
 @router.message(F.text == MENU_BTN_ASK)
