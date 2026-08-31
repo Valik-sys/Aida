@@ -367,11 +367,35 @@ def journal_kb() -> InlineKeyboardMarkup:
     )
 
 
-def student_card_kb(page: int = 0) -> InlineKeyboardMarkup:
+def student_card_kb(page: int = 0, student_id: int | None = None) -> InlineKeyboardMarkup:
     """Возврат к списку — на ту же страницу, с которой открыли."""
+    rows: List[List[InlineKeyboardButton]] = []
+    if student_id is not None:
+        rows.append([InlineKeyboardButton(
+            text="🚫 Отвязать от себя",
+            callback_data=f"unbind:ask:{student_id}:{page}",
+        )])
+    rows.append(
+        [InlineKeyboardButton(text="◀️ К списку", callback_data=f"students:list:{page}")]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def unbind_confirm_kb(student_id: int, page: int = 0) -> InlineKeyboardMarkup:
+    """Спрашиваем прежде, чем отцепить.
+
+    Отмена стоит первой и без пометки опасности: одно случайное нажатие
+    не должно отрезать ученика от материалов, а вернуть его можно только
+    новым кодом приглашения — то есть через разговор с ним.
+    """
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="◀️ К списку", callback_data=f"students:list:{page}")]
+            [InlineKeyboardButton(
+                text="Отмена", callback_data=f"student:{student_id}:{page}"
+            )],
+            [InlineKeyboardButton(
+                text="🚫 Да, отвязать", callback_data=f"unbind:do:{student_id}:{page}"
+            )],
         ]
     )
 

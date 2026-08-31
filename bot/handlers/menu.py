@@ -37,6 +37,7 @@ from bot.keyboards.inline import (
     short_text,
     source_choice_kb,
     student_card_kb,
+    unbind_confirm_kb,
     student_view_kb,
     students_kb,
     teacher_cabinet_kb,
@@ -65,6 +66,7 @@ from database.db import (
     get_teacher_totals,
     get_user,
     question_hash,
+    unbind_student,
     set_question_status,
     set_teacher_setting,
 )
@@ -1119,8 +1121,69 @@ async def student_card(callback: CallbackQuery) -> None:
         lines.append(f"Ошибок к повторению: {mistakes}")
 
     await _replace(
-        callback.message, "\n".join(lines), student_card_kb(page), parse_mode="HTML"
+        callback.message,
+        "\n".join(lines),
+        student_card_kb(page, student_id),
+        parse_mode="HTML",
     )
+
+
+# ---------- Отвязка ученика ----------
+
+def _unbind_parts(data: str) -> tuple[int, int] | None:
+    parts = (data or "").split(":")
+    try:
+        return int(parts[2]), int(parts[3]) if len(parts) > 3 else 0
+    except (IndexError, ValueError):
+        return None
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("unbind:ask:"))
+async def unbind_ask(callback: CallbackQuery) -> None:
+    """Спрашиваем подтверждение и честно говорим, что будет."""
+    parsed = _unbind_parts(callback.data or "")
+    await callback.answer()
+    if not parsed:
+        return
+    student_id, page = parsed
+
+    student = await get_user(student_id)
+    if not student or student.teacher_id != callback.from_user.id:
+        await _replace(callback.message, "Этот ученик больше не привязан к вам.")
+        return
+
+    name = html.escape(student.name or f"Ученик {student_id}")
+    await _replace(
+        callback.message,
+        f"Отвязать <b>{name}</b>?\n\n"
+        "Он потеряет доступ к вашим материалам и пропадёт из списка "
+        "и из статистики класса.\n"
+        "Его собственный прогресс сохранится, но вернуть его можно будет "
+        "только новым приглашением.",
+        unbind_confirm_kb(student_id, page),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("unbind:do:"))
+async def unbind_do(callback: CallbackQuery) -> None:
+    parsed = _unbind_parts(callback.data or "")
+    await callback.answer()
+    if not parsed:
+        return
+    student_id, page = parsed
+
+    student = await get_user(student_id)
+    name = html.escape(student.name or f"Ученик {student_id}") if student else ""
+
+    if not await unbind_student(student_id, callback.from_user.id):
+        # Либо уже отвязан, либо кнопка из старого сообщения про чужого
+        await _replace(callback.message, "Этот ученик больше не привязан к вам.")
+        return
+
+    logger.info("Преподаватель %s отвязал ученика %s", callback.from_user.id, student_id)
+    await _replace(callback.message, f"<b>{name}</b> отвязан.", parse_mode="HTML")
+    await _show_students(callback, page)
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("students:list"))

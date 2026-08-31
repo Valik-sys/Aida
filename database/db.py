@@ -315,6 +315,27 @@ async def bind_student(student_id: int, teacher_id: int, subject: str) -> None:
         await db.commit()
 
 
+async def unbind_student(student_id: int, teacher_id: int) -> bool:
+    """Отвязывает ученика от преподавателя. False — если он не его.
+
+    Проверка «его ли ученик» стоит прямо в запросе, а не в хендлере: кнопки
+    живут в чате вечно, и по старой кнопке с чужим номером иначе можно было
+    бы отцепить ученика у другого преподавателя.
+
+    Прогресс не трогаем. Ученик мог уйти на лето и вернуться, а копилка
+    ошибок и статистика — это его работа, а не имущество преподавателя.
+    Материалы он потеряет сразу: без привязки `content_provider` их
+    не отдаст.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "UPDATE users SET teacher_id = NULL WHERE telegram_id = ? AND teacher_id = ?",
+            (student_id, teacher_id),
+        )
+        await db.commit()
+        return bool(cursor.rowcount)
+
+
 async def update_last_active(telegram_id: int) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
