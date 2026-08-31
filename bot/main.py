@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from aiogram import Bot, Dispatcher
-from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import TelegramObject
 from dotenv import load_dotenv
 
@@ -26,6 +25,7 @@ from rag.retriever import _looks_like_faiss_store
 from services.sheets import sheets_cache
 from services.theory import load_theory, load_theory_from_disk
 from database.db import init_db, prune_answer_log, update_last_active
+from database.fsm_storage import SQLiteStorage
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,16 @@ async def main() -> None:
                 logger.exception("Не удалось построить vectorstore при старте")
 
     bot = Bot(token=config.TELEGRAM_TOKEN)
-    dp = Dispatcher(storage=MemoryStorage())
+
+    # Состояние на диске, а не в памяти: перезапуск бота больше не обрывает
+    # ученикам незаконченные тесты и карточки. Заодно чистим брошенные
+    # сессии — иначе таблица копит их бесконечно.
+    storage = SQLiteStorage()
+    removed = await storage.prune()
+    if removed:
+        logger.info("Убрано брошенных сессий: %d", removed)
+
+    dp = Dispatcher(storage=storage)
 
     dp.update.middleware(ActivityMiddleware())
 
