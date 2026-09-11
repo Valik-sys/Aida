@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import aiosqlite
 
 import config
-from database.models import ROLE_STUDENT, ROLE_TEACHER, Teacher, User
+from database.models import ROLE_STUDENT, ROLE_TEACHER, Subscription, Teacher, User
 
 
 DB_PATH = config.HISTORY_CT_DB_PATH
@@ -56,6 +56,16 @@ async def init_db() -> None:
             )
             """
         )
+        # Телеграмные имя и @username. Миграций в проекте нет, поэтому
+        # колонки добавляются поштучно — на старой базе их не было.
+        for column, definition in (
+            ("username", "TEXT NOT NULL DEFAULT ''"),
+            ("tg_name", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            try:
+                await db.execute(f"ALTER TABLE users ADD COLUMN {column} {definition}")
+            except Exception:  # noqa: BLE001
+                pass
         await db.execute(
             """
             CREATE TABLE IF NOT EXISTS teachers (
@@ -216,13 +226,67 @@ async def init_db() -> None:
             )
             """
         )
+        # Доступ преподавателя. Одна строка на человека: предмет здесь
+        # не при чём, платит человек за учеников.
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                tg_user_id INTEGER PRIMARY KEY,
+                phone TEXT NOT NULL DEFAULT '',
+                trial_until TEXT,
+                paid_until TEXT,
+                student_limit INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        # Номер — ключ, по которому доступ находит человека, поэтому он
+        # не должен принадлежать двоим. Пустые не считаются: до того, как
+        # преподаватель поделился номером, их сколько угодно.
+        await db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_subscriptions_phone "
+            "ON subscriptions (phone) WHERE phone <> ''"
+        )
+        # Оплата приходит раньше, чем человек нажимает «поделиться номером»,
+        # а иногда и раньше, чем он вообще заходит в бота. Такую выдачу
+        # держим здесь и применяем, когда номер появится.
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pending_grants (
+                phone TEXT PRIMARY KEY,
+                months INTEGER NOT NULL,
+                student_limit INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        # Заявки на продление. Хранятся, а не живут одним сообщением в чате:
+        # сообщение утонет в переписке, а человек будет ждать ответа.
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS renewal_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tg_user_id INTEGER NOT NULL,
+                student_limit INTEGER NOT NULL,
+                months INTEGER NOT NULL,
+                price INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                closed_at TEXT
+            )
+            """
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_renewal_open ON renewal_requests (closed_at)"
+        )
         await db.commit()
 
 
 # ---------- Пользователи ----------
 
 _USER_FIELDS = (
-    "telegram_id, role, teacher_id, current_subject, name, class_name, created_at, last_active_at"
+    "telegram_id, role, teacher_id, current_subject, name, class_name, created_at, "
+    "last_active_at, username, tg_name"
 )
 
 
@@ -236,6 +300,8 @@ def _row_to_user(row) -> User:
         class_name=row[5] or "",
         created_at=_parse_dt(row[6]),
         last_active_at=_parse_dt(row[7]),
+        username=row[8] or "",
+        tg_name=row[9] or "",
     )
 
 
@@ -336,11 +402,25 @@ async def unbind_student(student_id: int, teacher_id: int) -> bool:
         return bool(cursor.rowcount)
 
 
-async def update_last_active(telegram_id: int) -> None:
+async def update_last_active(
+    telegram_id: int, username: str = "", tg_name: str = ""
+) -> None:
+    """Отметка активности, заодно — свежие имя и @username из телеграма.
+
+    Человек меняет их когда угодно, поэтому берём при каждом действии,
+    а не один раз при регистрации. Пустые значения не затирают прежние:
+    у части людей @username нет вовсе.
+    """
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "UPDATE users SET last_active_at = ? WHERE telegram_id = ?",
-            (_now(), telegram_id),
+            """
+            UPDATE users SET
+                last_active_at = ?,
+                username = CASE WHEN ? <> '' THEN ? ELSE username END,
+                tg_name = CASE WHEN ? <> '' THEN ? ELSE tg_name END
+            WHERE telegram_id = ?
+            """,
+            (_now(), username, username, tg_name, tg_name, telegram_id),
         )
         await db.commit()
 
@@ -1188,3 +1268,247 @@ async def get_question_reports(teacher_id: int, subject: str) -> List[Dict[str, 
         item["wrong_by"] = wrong
 
     return list(grouped.values())
+
+
+# ---------- Подписки ----------
+
+_SUB_FIELDS = (
+    "tg_user_id, phone, trial_until, paid_until, student_limit, created_at, updated_at"
+)
+
+
+def _row_to_subscription(row) -> Subscription:
+    return Subscription(
+        tg_user_id=row[0],
+        phone=row[1] or "",
+        trial_until=_parse_dt(row[2]),
+        paid_until=_parse_dt(row[3]),
+        student_limit=row[4] or 0,
+        created_at=_parse_dt(row[5]),
+        updated_at=_parse_dt(row[6]),
+    )
+
+
+async def get_subscription(tg_user_id: int) -> Optional[Subscription]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            f"SELECT {_SUB_FIELDS} FROM subscriptions WHERE tg_user_id = ?",
+            (tg_user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+    return _row_to_subscription(row) if row else None
+
+
+async def get_subscription_by_phone(phone: str) -> Optional[Subscription]:
+    if not phone:
+        return None
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            f"SELECT {_SUB_FIELDS} FROM subscriptions WHERE phone = ?", (phone,)
+        ) as cursor:
+            row = await cursor.fetchone()
+    return _row_to_subscription(row) if row else None
+
+
+async def create_subscription(
+    tg_user_id: int, trial_until: dt.datetime, student_limit: int
+) -> Subscription:
+    """Заводит доступ с пробным периодом. Повторный вызов ничего не меняет."""
+    now = _now()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT OR IGNORE INTO subscriptions
+                (tg_user_id, trial_until, student_limit, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (tg_user_id, trial_until.isoformat(), student_limit, now, now),
+        )
+        await db.commit()
+    sub = await get_subscription(tg_user_id)
+    assert sub is not None
+    return sub
+
+
+async def set_subscription_phone(tg_user_id: int, phone: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE subscriptions SET phone = ?, updated_at = ? WHERE tg_user_id = ?",
+            (phone, _now(), tg_user_id),
+        )
+        await db.commit()
+
+
+async def set_subscription_paid(
+    tg_user_id: int, paid_until: dt.datetime, student_limit: int
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            UPDATE subscriptions
+            SET paid_until = ?, student_limit = ?, updated_at = ?
+            WHERE tg_user_id = ?
+            """,
+            (paid_until.isoformat(), student_limit, _now(), tg_user_id),
+        )
+        await db.commit()
+
+
+async def set_subscription_dates(
+    tg_user_id: int,
+    trial_until: Optional[dt.datetime],
+    paid_until: Optional[dt.datetime],
+    student_limit: int,
+) -> None:
+    """Ставит сроки как есть — для репетиции состояний админом.
+
+    Обычная выдача идёт через `services/subscription.py` и считает даты сама;
+    здесь они задаются напрямую, чтобы можно было посмотреть, как выглядит
+    кончившийся доступ, не дожидаясь месяца.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            UPDATE subscriptions
+            SET trial_until = ?, paid_until = ?, student_limit = ?, updated_at = ?
+            WHERE tg_user_id = ?
+            """,
+            (
+                trial_until.isoformat() if trial_until else None,
+                paid_until.isoformat() if paid_until else None,
+                student_limit,
+                _now(),
+                tg_user_id,
+            ),
+        )
+        await db.commit()
+
+
+async def list_subscriptions() -> List[Subscription]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            f"SELECT {_SUB_FIELDS} FROM subscriptions ORDER BY created_at"
+        ) as cursor:
+            rows = await cursor.fetchall()
+    return [_row_to_subscription(r) for r in rows]
+
+
+async def add_pending_grant(phone: str, months: int, student_limit: int) -> None:
+    """Выдача впрок — на номер, которого в базе ещё нет.
+
+    Повторная выдача на тот же номер заменяет прежнюю, а не копится:
+    иначе опечатка в команде удваивала бы срок.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO pending_grants (phone, months, student_limit, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (phone) DO UPDATE SET
+                months = excluded.months,
+                student_limit = excluded.student_limit,
+                created_at = excluded.created_at
+            """,
+            (phone, months, student_limit, _now()),
+        )
+        await db.commit()
+
+
+async def take_pending_grant(phone: str) -> Optional[Dict[str, int]]:
+    """Забирает выдачу впрок по номеру и удаляет её. None — если нет такой."""
+    if not phone:
+        return None
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT months, student_limit FROM pending_grants WHERE phone = ?", (phone,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            return None
+        await db.execute("DELETE FROM pending_grants WHERE phone = ?", (phone,))
+        await db.commit()
+    return {"months": row[0], "student_limit": row[1]}
+
+
+async def add_renewal_request(
+    tg_user_id: int, student_limit: int, months: int, price: int
+) -> None:
+    """Новая заявка заменяет прежние открытые от этого же человека.
+
+    Иначе трижды нажатая кнопка превращается в три одинаковые карточки,
+    и непонятно, о каком тарифе вы с ним в итоге договаривались. Верной
+    считается последняя.
+    """
+    now = _now()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE renewal_requests SET closed_at = ? "
+            "WHERE tg_user_id = ? AND closed_at IS NULL",
+            (now, tg_user_id),
+        )
+        await db.execute(
+            """
+            INSERT INTO renewal_requests
+                (tg_user_id, student_limit, months, price, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (tg_user_id, student_limit, months, price, now),
+        )
+        await db.commit()
+
+
+async def close_renewal_request(request_id: int) -> bool:
+    """Закрывает одну заявку — когда договорились иначе или человек передумал."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "UPDATE renewal_requests SET closed_at = ? "
+            "WHERE id = ? AND closed_at IS NULL",
+            (_now(), request_id),
+        )
+        await db.commit()
+        return bool(cursor.rowcount)
+
+
+async def close_renewal_requests(tg_user_id: int) -> int:
+    """Закрывает все открытые заявки человека — доступ ему уже выдан."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "UPDATE renewal_requests SET closed_at = ? "
+            "WHERE tg_user_id = ? AND closed_at IS NULL",
+            (_now(), tg_user_id),
+        )
+        await db.commit()
+        return cursor.rowcount
+
+
+async def list_open_renewal_requests() -> List[Dict[str, Any]]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT id, tg_user_id, student_limit, months, price, created_at "
+            "FROM renewal_requests WHERE closed_at IS NULL ORDER BY created_at"
+        ) as cursor:
+            rows = await cursor.fetchall()
+    return [
+        {
+            "id": r[0],
+            "tg_user_id": r[1],
+            "student_limit": r[2],
+            "months": r[3],
+            "price": r[4],
+            "created_at": r[5],
+        }
+        for r in rows
+    ]
+
+
+async def list_pending_grants() -> List[Dict[str, Any]]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT phone, months, student_limit, created_at FROM pending_grants "
+            "ORDER BY created_at"
+        ) as cursor:
+            rows = await cursor.fetchall()
+    return [
+        {"phone": r[0], "months": r[1], "student_limit": r[2], "created_at": r[3]}
+        for r in rows
+    ]

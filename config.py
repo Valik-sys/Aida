@@ -65,3 +65,7 @@ HISTORY_CT_DB_PATH = os.getenv("HISTORY_CT_DB_PATH", "data/history_ct.sqlite3").
 # Admin
 ADMIN_IDS = _env_list_int("ADMIN_IDS", [])
 
+# Кому писать за продлением доступа: @username или ссылка. Пока пусто,
+# бот не выдумывает контакт, а просто говорит «напишите нам».
+SUPPORT_CONTACT = os.getenv("SUPPORT_CONTACT", "").strip()
+

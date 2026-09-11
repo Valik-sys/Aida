@@ -21,7 +21,8 @@ from database.db import (
     set_subject,
 )
 from database.models import ROLE_STUDENT, ROLE_TEACHER, Teacher
-from services import storage
+from services import storage, subscription as sub_lib
+from services.subscription import ru_date
 
 
 logger = logging.getLogger(__name__)
@@ -51,9 +52,51 @@ async def _show_menu(message: Message, user) -> None:
     )
 
 
+async def _can_accept_student(message: Message, teacher: Teacher, student_id: int) -> bool:
+    """Пускает ученика, если у преподавателя есть доступ и место в тарифе.
+
+    Лимит жёсткий: иначе тариф по числу учеников ничего не значит. Своих
+    уже подключённых это не касается — проверяем только новых.
+
+    Ученику причину не объясняем: платит преподаватель, и подставлять его
+    перед собственным клиентом нельзя. Преподаватель узнаёт сам, сообщением.
+    """
+    slot = await sub_lib.student_slot(teacher.tg_user_id, student_id)
+    if slot.allowed:
+        return True
+
+    await message.answer(
+        "Преподаватель пока не может принять новых учеников.\n"
+        "Напиши ему — он всё уладит, и пришли код ещё раз."
+    )
+
+    reason = (
+        f"Место в тарифе закончилось: {slot.count} из {slot.limit}."
+        if slot.reason == "limit"
+        else "Доступ закончился."
+    )
+    try:
+        await message.bot.send_message(
+            teacher.tg_user_id,
+            f"⚠️ К вам не смог подключиться новый ученик.\n{reason}\n\n"
+            "Откройте «💳 Подписка», чтобы это исправить.",
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("Не удалось предупредить преподавателя %s", teacher.tg_user_id)
+    return False
+
+
 async def _attach_to_teacher(message: Message, state: FSMContext, teacher: Teacher) -> None:
     """Привязывает ученика к преподавателю и ведёт дальше по анкете."""
     student_id = message.from_user.id
+    if not await _can_accept_student(message, teacher, student_id):
+        # Оставляем ученика в ожидании кода: преподаватель освободит место,
+        # и код можно будет прислать снова. Со сброшенным состоянием
+        # повторный код не ловил никто, и ребёнок упирался в тишину —
+        # даже если пришёл по ссылке, где состояния не было вовсе
+        await state.set_state(Onboarding.waiting_invite)
+        return
+
     await bind_student(student_id, teacher.tg_user_id, teacher.subject)
 
     subject_name = subjects_cfg.subject_name(teacher.subject)
@@ -176,6 +219,9 @@ async def choose_subject(callback: CallbackQuery, state: FSMContext) -> None:
 
     teacher = await ensure_teacher(telegram_id, subject)
     storage.ensure_teacher_dirs(telegram_id, subject)
+    # Пробный период заводится здесь, при первом предмете: отсюда считается
+    # месяц, и с этого момента у человека есть доступ
+    access = await sub_lib.ensure_trial(telegram_id)
     logger.info("Teacher registered: id=%s subject=%s", telegram_id, subject)
 
     link = await invite_link(callback.bot, teacher.invite_code)
@@ -184,6 +230,9 @@ async def choose_subject(callback: CallbackQuery, state: FSMContext) -> None:
         f"Готово! Предмет: {subjects_cfg.subject_name(subject)}.\n\n"
         f"Ссылка для учеников:\n{link}\n"
         f"Код на случай, если ссылка не открывается: <b>{teacher.invite_code}</b>\n\n"
+        f"Пробный период — {sub_lib.TRIAL_DAYS} дней, "
+        f"до {ru_date(access.until)}. Учеников можно подключить "
+        f"до {access.student_limit}.\n\n"
         "Дальше загрузите свои билеты — тренажёр соберётся сам.",
         parse_mode="HTML",
     )

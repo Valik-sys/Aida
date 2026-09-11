@@ -12,6 +12,7 @@ from aiogram.types import (
 import subjects as subjects_cfg
 from database.models import ROLE_STUDENT, ROLE_TEACHER
 from services import sections as sections_lib
+from services.subscription import CURRENCY, months_word
 
 # Названия разделов истории. Источник один — subjects.py, чтобы сетка
 # программы не разъезжалась между экранами ученика и загрузкой билетов.
@@ -44,6 +45,16 @@ MENU_BTN_SETTINGS = "⚙️ Настройки"
 MENU_BTN_STUDENT_VIEW = "🎓 Режим ученика"
 MENU_BTN_BACK_TO_CABINET = "⬅️ В кабинет"
 
+# Подписка стоит на общей клавиатуре, а не внутри настроек: про то,
+# что доступ кончается, должны помнить, а спрятанное не работает.
+MENU_BTN_SUBSCRIPTION = "💳 Подписка"
+
+# Кнопка «поделиться номером» бывает только на нижней клавиатуре —
+# инлайновой такой в телеграме нет. Поэтому на время запроса она подменяет
+# клавиатуру кабинета, а после ответа кабинет возвращается.
+BTN_SHARE_PHONE = "📱 Отправить мой номер"
+BTN_CANCEL_SHARE = "Отмена"
+
 # Все подписи кнопок нижней клавиатуры. Нужны, чтобы режимы, ожидающие ввода,
 # не проглатывали нажатия меню: иначе из такого режима не выйти.
 ALL_MENU_BUTTONS = frozenset({
@@ -51,6 +62,7 @@ ALL_MENU_BUTTONS = frozenset({
     MENU_BTN_TOPICS, MENU_BTN_MISTAKES, MENU_BTN_PROGRESS, MENU_BTN_HOME,
     MENU_BTN_UPLOAD, MENU_BTN_MY_TRAINER, MENU_BTN_STUDENTS,
     MENU_BTN_SETTINGS, MENU_BTN_STUDENT_VIEW, MENU_BTN_BACK_TO_CABINET,
+    MENU_BTN_SUBSCRIPTION,
 })
 
 # Как режимы раскладываются по рядам клавиатуры: сначала пары, потом одиночки.
@@ -92,6 +104,7 @@ def teacher_cabinet_kb(subject: str | None = None) -> ReplyKeyboardMarkup:
     rows.append(
         [KeyboardButton(text=MENU_BTN_SETTINGS), KeyboardButton(text=MENU_BTN_STUDENT_VIEW)]
     )
+    rows.append([KeyboardButton(text=MENU_BTN_SUBSCRIPTION)])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
@@ -261,6 +274,152 @@ def settings_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="📚 Материалы тренажёра", callback_data="settings:source")],
         ]
+    )
+
+
+def subscription_kb(has_phone: bool) -> InlineKeyboardMarkup:
+    """Экран подписки. Продление — главное действие, номер — следом."""
+    rows: List[List[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text="💳 Продлить доступ", callback_data="sub:ren:root")]
+    ]
+    rows.append([InlineKeyboardButton(
+        text="📱 Изменить номер" if has_phone else "📱 Поделиться номером",
+        callback_data="sub:share",
+    )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def blocked_kb() -> InlineKeyboardMarkup:
+    """Кнопка под отказом заслонки.
+
+    Нужна потому, что клавиатура у преподавателя может быть любой: в режиме
+    ученика кнопки «Подписка» внизу нет, и совет «откройте Подписку»
+    оказывался бы советом в пустоту.
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=MENU_BTN_SUBSCRIPTION, callback_data="sub:open")],
+    ])
+
+
+def renew_limits_kb(tariffs: Sequence, suggested: int) -> InlineKeyboardMarkup:
+    """Шаг 1: сколько учеников. Подходящий тариф помечен, но не навязан."""
+    rows: List[List[InlineKeyboardButton]] = []
+    for limit, price in tariffs:
+        mark = "▸ " if limit == suggested else ""
+        rows.append([InlineKeyboardButton(
+            text=f"{mark}до {limit} учеников — {price} {CURRENCY}/мес",
+            callback_data=f"sub:ren:lim:{limit}",
+        )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def renew_terms_kb(limit: int, terms: Sequence) -> InlineKeyboardMarkup:
+    """Шаг 2: срок. Цена сразу на кнопке — иначе выбирают вслепую."""
+    rows: List[List[InlineKeyboardButton]] = []
+    for months, price, discount in terms:
+        # У месяца скидки нет — он и должен читаться как самый невыгодный
+        tail = f" · выгода {discount}%" if discount else ""
+        rows.append([InlineKeyboardButton(
+            text=f"{months} {months_word(months)} — {price} {CURRENCY}{tail}",
+            callback_data=f"sub:ren:term:{limit}:{months}",
+        )])
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="sub:ren:root")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def renew_confirm_kb(limit: int, months: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="📩 Оставить заявку", callback_data=f"sub:ren:send:{limit}:{months}"
+        )],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data=f"sub:ren:lim:{limit}")],
+    ])
+
+
+def request_card_kb(
+    teacher_id: int,
+    limit: int,
+    months: int,
+    username: str = "",
+    *,
+    request_id: int | None = None,
+    position: int | None = None,
+    total: int | None = None,
+) -> InlineKeyboardMarkup:
+    """Карточка заявки у админа: выдать доступ в одно нажатие.
+
+    Одна и та же карточка приходит сама при новой заявке и открывается
+    по `/requests`. Во втором случае добавляются листалка и «закрыть»:
+    в списке заявка должна уметь исчезать и без выдачи доступа.
+
+    Ссылка на человека — только по @username: `tg://user?id=` в кнопках
+    работает не во всех клиентах, и мёртвая кнопка хуже её отсутствия.
+    """
+    rows: List[List[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(
+            text="✅ Выдать доступ",
+            callback_data=f"sub:req:ok:{teacher_id}:{limit}:{months}",
+        )]
+    ]
+    if username:
+        rows.append([InlineKeyboardButton(
+            text="✍️ Написать", url=f"https://t.me/{username.lstrip('@')}"
+        )])
+    if request_id is not None:
+        rows.append([InlineKeyboardButton(
+            text="🗑 Закрыть без выдачи",
+            callback_data=f"sub:req:close:{request_id}",
+        )])
+    if position is not None and total and total > 1:
+        rows.append([
+            InlineKeyboardButton(
+                text="◀️", callback_data=f"sub:req:at:{(position - 1) % total}"
+            ),
+            InlineKeyboardButton(text=f"{position + 1} из {total}", callback_data="noop"),
+            InlineKeyboardButton(
+                text="▶️", callback_data=f"sub:req:at:{(position + 1) % total}"
+            ),
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def sub_test_kb(guard_on: bool) -> InlineKeyboardMarkup:
+    """Репетиция состояний подписки — только для админа.
+
+    Префикс `sub:` не случаен: заслонка пропускает его всегда, иначе
+    из состояния «доступ кончился» нельзя было бы вернуться обратно.
+    """
+    guard_label = (
+        "🔓 Вернуть мне обход заслонки" if guard_on
+        else "🔒 Проверять и меня тоже"
+    )
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🟡 Пробный — 30 дней", callback_data="sub:test:trial30")],
+            [InlineKeyboardButton(text="🟠 Пробный — 2 дня", callback_data="sub:test:trial2")],
+            [InlineKeyboardButton(text="🔴 Доступ кончился", callback_data="sub:test:expired")],
+            [InlineKeyboardButton(text="🟢 Оплачено — 6 месяцев", callback_data="sub:test:paid6")],
+            [InlineKeyboardButton(text=guard_label, callback_data="sub:test:guard")],
+            [InlineKeyboardButton(text="👀 Экран подписки", callback_data="sub:test:screen")],
+            [InlineKeyboardButton(text="🎓 Что видит ученик", callback_data="sub:test:student")],
+        ]
+    )
+
+
+def share_phone_kb() -> ReplyKeyboardMarkup:
+    """Нижняя клавиатура на один запрос номера.
+
+    Подменяет клавиатуру кабинета — другого способа получить номер
+    в телеграме нет. Кабинет возвращается сразу после ответа, в том числе
+    после отмены: иначе преподаватель останется без меню.
+    """
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=BTN_SHARE_PHONE, request_contact=True)],
+            [KeyboardButton(text=BTN_CANCEL_SHARE)],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
     )
 
 

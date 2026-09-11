@@ -12,8 +12,10 @@ _project_root = Path(__file__).resolve().parent.parent
 load_dotenv(_project_root / ".env")
 
 import config
+from bot.access import SubscriptionMiddleware
 from bot.handlers.start import router as start_router
 from bot.handlers.menu import router as menu_router, update_router
+from bot.handlers.subscription import router as subscription_router
 from bot.handlers.tests import router as tests_router
 from bot.handlers.flashcards import router as flashcards_router
 from bot.handlers.chat import router as chat_router
@@ -42,7 +44,13 @@ class ActivityMiddleware:
         user = data.get("event_from_user")
         if user and not user.is_bot:
             try:
-                await update_last_active(user.id)
+                # Здесь же подхватываем имя и @username: это единственное
+                # место, через которое проходит вообще всякое действие
+                await update_last_active(
+                    user.id,
+                    username=user.username or "",
+                    tg_name=user.full_name or "",
+                )
             except Exception:
                 pass  # не ломаем основной флоу из-за трекинга
         return await handler(event, data)
@@ -107,7 +115,14 @@ async def main() -> None:
 
     dp.update.middleware(ActivityMiddleware())
 
+    # Заслонка по доступу — до фильтров и хендлеров, иначе каждый новый режим
+    # пришлось бы вспоминать закрывать отдельно
+    guard = SubscriptionMiddleware()
+    dp.message.outer_middleware(guard)
+    dp.callback_query.outer_middleware(guard)
+
     dp.include_router(start_router)
+    dp.include_router(subscription_router)
     dp.include_router(teacher_upload_router)
     dp.include_router(menu_router)
     dp.include_router(update_router)
