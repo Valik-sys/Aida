@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 import subjects as subjects_cfg
 from database.db import (
+    get_base_questions_by_status,
     get_hidden_questions,
     get_student_reported,
     get_teacher_setting,
@@ -102,21 +103,93 @@ async def effective_source(user: User, subject: str) -> str:
     return default
 
 
+# ---------- Общий вопрос или свой ----------
+#
+# Решения по вопросу принимает тот, кто за него отвечает. Свой вопрос
+# преподаватель скрывает и возвращает сам. Общий вопрос базы он не писал,
+# и распоряжается им админ — сразу у всех преподавателей.
+
+_base_hashes: tuple[int, int, frozenset] | None = None
+
+
+def base_question_hashes() -> frozenset:
+    """Отпечатки всех общих вопросов. Считаются один раз на набор."""
+    global _base_hashes
+    rows = sheets_cache.base_tests_rows
+    signature = (id(rows), len(rows))
+    if _base_hashes is None or _base_hashes[:2] != signature:
+        _base_hashes = (
+            *signature,
+            frozenset(question_hash(r.get("Вопрос") or "") for r in rows),
+        )
+    return _base_hashes[2]
+
+
+def is_base_question(
+    qhash: str, teacher_id: Optional[int] = None, subject: str = ""
+) -> bool:
+    """Общий ли это вопрос, которым распоряжается админ.
+
+    Если у преподавателя в файлах лежит вопрос с точно таким же текстом,
+    вопрос считается его: он его загрузил и отвечает за него сам.
+    """
+    if qhash not in base_question_hashes():
+        return False
+    if teacher_id and subject:
+        own = teacher_content.load_tests(teacher_id, subject)
+        if any(question_hash(r.get("Вопрос") or "") == qhash for r in own):
+            return False
+    return True
+
+
+def own_reports(
+    items: List[Dict[str, Any]], teacher_id: int, subject: str
+) -> List[Dict[str, Any]]:
+    """Жалобы, которые разбирает сам преподаватель, — без общих вопросов.
+
+    Карточку на общий вопрос он получал раньше и не мог с ней ничего
+    сделать по существу: вопрос писал не он. Теперь её получает админ.
+    """
+    base = base_question_hashes()
+    if not base or not items:
+        return items
+    own = {
+        question_hash(r.get("Вопрос") or "")
+        for r in teacher_content.load_tests(teacher_id, subject)
+    }
+    return [
+        item for item in items
+        if item.get("question_hash") not in base or item.get("question_hash") in own
+    ]
+
+
 async def _drop_reported(
     rows: List[Dict[str, str]], user: User, teacher_id: Optional[int]
 ) -> List[Dict[str, str]]:
     """Убирает вопросы, которых этому человеку видеть не нужно.
 
-    Два случая: вопрос скрыт у всех — преподаватель убрал его или набралось
-    достаточно жалоб на брак; и вопрос, на который пожаловался лично этот
-    ученик. Непонятые вопросы остаются в обороте: их и надо прорешать.
+    Три случая:
+
+    - общий вопрос скрыт у всех — на брак пожаловались ученики разных
+      преподавателей, или админ убрал его;
+    - свой вопрос скрыт у преподавателя — он убрал его сам или набралось
+      жалоб на брак в его группе;
+    - на вопрос пожаловался лично этот ученик.
+
+    Непонятые вопросы остаются в обороте: их и надо прорешать.
     """
-    if not rows or not teacher_id:
+    if not rows:
         return rows
 
-    hidden = await get_hidden_questions(teacher_id, list(reports.INVISIBLE))
-    mine = await get_student_reported(user.telegram_id, list(reports.BROKEN_REASONS))
-    skip = hidden | mine
+    base = base_question_hashes()
+    skip = set(await get_base_questions_by_status(list(reports.INVISIBLE)))
+    skip |= await get_student_reported(user.telegram_id, list(reports.BROKEN_REASONS))
+    if teacher_id:
+        teacher_hidden = await get_hidden_questions(teacher_id, list(reports.INVISIBLE))
+        # Решения преподавателя касаются только его вопросов. Общими
+        # распоряжается админ — иначе у одних учеников вопрос скрыт, у других
+        # виден, и никто уже не знает, в каком он состоянии
+        skip |= {h for h in teacher_hidden if h not in base}
     if not skip:
         return rows
 

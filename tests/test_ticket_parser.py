@@ -292,3 +292,80 @@ def test_strip_media_preserves_parsing():
         assert [q.question_text for q in original] == [q.question_text for q in stripped]
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+class TestPartHeadersAndKeyEnd:
+    """Две поломки, найденные 11.09.2026 при сборке шаблона для преподавателя.
+
+    Обе тихие: файл разбирается, ошибок не видно, а у ученика на экране
+    оказывается мусор — лишний вариант ответа или чужой правильный ответ.
+    """
+
+    def test_part_header_with_colon_is_not_an_option(self):
+        """«Часть В:» прилипала пятым вариантом к последнему вопросу части А:
+        граница частей узнавалась только без двоеточия, а пишут его почти всегда."""
+        from services.ticket_parser import parse_lines
+
+        questions, _a, _b = parse_lines([
+            "Часть А:", "",
+            "А1. Кто основал Полоцкое княжество?",
+            "1) Рогволод", "2) Всеслав", "3) Изяслав", "4) Брячислав", "",
+            "Часть В:", "",
+            "В1. Укажите год первого упоминания Полоцка.", "",
+            "Ответы:", "А1 — 1; В1 — 862",
+        ])
+
+        by_marker = {f"{q.part}{q.num}": q for q in questions}
+        options = [o for o in by_marker["А1"].options if o.strip()]
+        assert options == ["Рогволод", "Всеслав", "Изяслав", "Брячислав"]
+        assert all("Часть" not in o for o in options)
+        assert by_marker["В1"].expected == "862"
+
+    def test_text_under_the_key_does_not_overwrite_answers(self):
+        """Подпись под ключом ломала ключ: в строке «А2Б3В1 — соответствие»
+        разбор видел пару «В1 — соответствие» и переписывал ей настоящий ответ."""
+        from services.ticket_parser import parse_lines
+
+        questions, _a, _b = parse_lines([
+            "В1. Определите три правильных утверждения о периодизации:", "",
+            "Ответы:", "В1 — 135",
+            "",
+            "Пояснение к ключу:",
+            "2 — номер варианта",
+            "А2Б3В1 — соответствие",
+            "БГВА — последовательность",
+        ])
+
+        assert questions[0].expected == "135"
+
+    def test_caption_above_the_key_still_works(self):
+        """Над ключом подпись бывает законно — она обрывать разбор не должна."""
+        from services.ticket_parser import parse_lines
+
+        questions, _a, _b = parse_lines([
+            "А1. Кто основал Полоцкое княжество?",
+            "1) Рогволод", "2) Всеслав", "",
+            "Ответы:",
+            "Правильные ответы к варианту 1:",
+            "А1 — 1",
+        ])
+
+        assert questions[0].expected == "1"
+
+    def test_key_split_by_parts_survives(self):
+        """Ключ, разложенный по частям с пустыми строками, — обычное дело."""
+        from services.ticket_parser import parse_lines
+
+        questions, _a, _b = parse_lines([
+            "А1. Вопрос с вариантами ответа, достаточно длинный.",
+            "1) первый", "2) второй", "",
+            "В1. Открытый вопрос, тоже достаточно длинный.", "",
+            "Ответы:",
+            "Часть А:", "А1 — 2",
+            "",
+            "Часть В:", "В1 — Метрополия",
+        ])
+
+        by_marker = {f"{q.part}{q.num}": q for q in questions}
+        assert by_marker["А1"].expected == "2"
+        assert by_marker["В1"].expected == "Метрополия"

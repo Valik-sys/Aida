@@ -30,16 +30,20 @@ from bot.keyboards.inline import (
     tests_root_kb,
     variants_kb,
 )
+from bot.handlers import base_reports
 from bot.states.states import TestFlow
 from database.db import (
     add_mistake,
     add_question_report,
     count_due,
+    count_report_teachers,
+    get_base_question_status,
     get_question_status,
     get_schedule,
     get_user,
     question_hash,
     record_answer,
+    set_base_question_status,
     set_question_status,
 )
 from services.answer_explainer import explain_answer
@@ -1732,21 +1736,33 @@ async def report_reason_chosen(callback: CallbackQuery, state: FSMContext) -> No
         teacher_id, subject, qhash, callback.from_user.id, reason, text
     )
 
-    status = await get_question_status(teacher_id, qhash)
-    if reports.should_hide(collected, status):
-        await set_question_status(teacher_id, subject, qhash, reports.STATUS_HIDDEN)
-        await _notify_teacher_hidden(callback.bot, teacher_id, text)
+    is_base = content_provider.is_base_question(qhash, teacher_id, subject)
+    if is_base:
+        # Общий вопрос: скрывается у всех сразу, но только когда на брак
+        # пожаловались ученики разных преподавателей, — и решает админ
+        base_status = await get_base_question_status(qhash)
+        teachers = await count_report_teachers(qhash, list(reports.BROKEN_REASONS))
+        if reports.should_hide_base(teachers, base_status):
+            await set_base_question_status(qhash, reports.STATUS_HIDDEN)
+            await base_reports.notify_admins_hidden(callback.bot, qhash)
+    else:
+        status = await get_question_status(teacher_id, qhash)
+        if reports.should_hide(collected, status):
+            await set_question_status(teacher_id, subject, qhash, reports.STATUS_HIDDEN)
+            await _notify_teacher_hidden(callback.bot, teacher_id, text)
 
     if not reports.hides_for_student(reason):
         # «Не понял» — вопрос остаётся, отвечать всё равно нужно
         await callback.message.answer(
-            "Отметил. Преподаватель увидит, что вопрос оказался сложным."
+            "Отметил, спасибо." if is_base
+            else "Отметил. Преподаватель увидит, что вопрос оказался сложным."
         )
         return
 
+    # Общий вопрос преподаватель не разбирает, обещать это ученику нельзя
     await callback.message.answer(
         "Спасибо. Этот вопрос тебе больше не попадётся,\n"
-        "преподаватель его посмотрит."
+        + ("мы его проверим." if is_base else "преподаватель его посмотрит.")
     )
 
     if question is None or not data.get("test_session"):

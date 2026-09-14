@@ -46,6 +46,14 @@ BROKEN_REASONS = frozenset({REASON_NO_OPTIONS, REASON_INCORRECT})
 # недостижим — вопрос висел бы сломанным до конца года.
 HIDE_THRESHOLD = 2
 
+# Общий вопрос базы — не преподавательский, и правило для него другое.
+# Он скрывается у всех сразу, но только когда на брак пожаловались ученики
+# хотя бы двух РАЗНЫХ преподавателей. Иначе двое друзей из одной группы
+# вычищали бы общую базу для всех остальных. Решение о возврате принимает
+# админ, а не преподаватель: вопрос писал не он, и война флагов
+# «один вернул — другой скрыл» не нужна (решено 13.09.2026).
+BASE_HIDE_TEACHERS = 2
+
 # Статусы вопроса
 STATUS_HIDDEN = "hidden"        # скрыт автоматически по жалобам
 STATUS_REMOVED = "removed"      # убран преподавателем
@@ -77,6 +85,18 @@ def should_hide(reasons: Iterable[str], status: str | None = None) -> bool:
     if status in (STATUS_CONFIRMED, STATUS_REMOVED, STATUS_HIDDEN):
         return False
     return count_broken(reasons) >= HIDE_THRESHOLD
+
+
+def should_hide_base(broken_teachers: int, status: str | None = None) -> bool:
+    """Пора ли прятать общий вопрос у всех.
+
+    Считаются не жалобы, а преподаватели, чьи ученики пожаловались на брак.
+    Возвращённый админом вопрос больше не прячется — по той же причине,
+    что и у преподавателя: иначе его убирали бы снова и снова.
+    """
+    if status in (STATUS_CONFIRMED, STATUS_REMOVED, STATUS_HIDDEN):
+        return False
+    return broken_teachers >= BASE_HIDE_TEACHERS
 
 
 def hides_for_student(reason: str) -> bool:

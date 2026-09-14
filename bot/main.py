@@ -13,6 +13,7 @@ load_dotenv(_project_root / ".env")
 
 import config
 from bot.access import SubscriptionMiddleware
+from bot.handlers.base_reports import router as base_reports_router
 from bot.handlers.start import router as start_router
 from bot.handlers.menu import router as menu_router, update_router
 from bot.handlers.subscription import router as subscription_router
@@ -123,6 +124,7 @@ async def main() -> None:
 
     dp.include_router(start_router)
     dp.include_router(subscription_router)
+    dp.include_router(base_reports_router)
     dp.include_router(teacher_upload_router)
     dp.include_router(menu_router)
     dp.include_router(update_router)

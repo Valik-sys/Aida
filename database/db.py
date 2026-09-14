@@ -226,6 +226,18 @@ async def init_db() -> None:
             )
             """
         )
+        # Решения по общим вопросам базы — одни на всех преподавателей.
+        # Отдельно от question_flags, где решения у каждого преподавателя свои:
+        # общий вопрос скрывается и возвращается админом сразу у всех.
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS base_question_flags (
+                question_hash TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
         # Доступ преподавателя. Одна строка на человека: предмет здесь
         # не при чём, платит человек за учеников.
         await db.execute(
@@ -1512,3 +1524,103 @@ async def list_pending_grants() -> List[Dict[str, Any]]:
         {"phone": r[0], "months": r[1], "student_limit": r[2], "created_at": r[3]}
         for r in rows
     ]
+
+
+# ---------- Общие вопросы базы: решения на всех ----------
+
+async def get_base_question_status(question_hash: str) -> Optional[str]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT status FROM base_question_flags WHERE question_hash = ?",
+            (question_hash,),
+        ) as cursor:
+            row = await cursor.fetchone()
+    return row[0] if row else None
+
+
+async def set_base_question_status(question_hash: str, status: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO base_question_flags (question_hash, status, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT (question_hash) DO UPDATE SET
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            """,
+            (question_hash, status, _now()),
+        )
+        await db.commit()
+
+
+async def get_base_questions_by_status(statuses: Sequence[str]) -> set:
+    if not statuses:
+        return set()
+    marks = ",".join("?" for _ in statuses)
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            f"SELECT question_hash FROM base_question_flags WHERE status IN ({marks})",
+            tuple(statuses),
+        ) as cursor:
+            rows = await cursor.fetchall()
+    return {r[0] for r in rows}
+
+
+async def list_base_questions_by_status(status: str) -> List[str]:
+    """Отпечатки общих вопросов в этом статусе — от давних к свежим."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT question_hash FROM base_question_flags "
+            "WHERE status = ? ORDER BY updated_at",
+            (status,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+    return [r[0] for r in rows]
+
+
+async def count_report_teachers(question_hash: str, reasons: Sequence[str]) -> int:
+    """Сколько РАЗНЫХ преподавателей среди жалоб с этими причинами.
+
+    Жалоба хранится с преподавателем того, кто пожаловался, поэтому число
+    преподавателей — это число независимых групп, заметивших поломку.
+    """
+    if not reasons:
+        return 0
+    marks = ",".join("?" for _ in reasons)
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            f"""
+            SELECT COUNT(DISTINCT teacher_id) FROM question_reports
+            WHERE question_hash = ? AND reason IN ({marks})
+            """,
+            (question_hash, *reasons),
+        ) as cursor:
+            row = await cursor.fetchone()
+    return row[0] if row else 0
+
+
+async def get_reports_for_question(question_hash: str) -> Dict[str, Any]:
+    """Всё о жалобах на один вопрос — у всех преподавателей сразу."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """
+            SELECT reason, teacher_id, question_preview
+            FROM question_reports WHERE question_hash = ?
+            """,
+            (question_hash,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+    reasons: Dict[str, int] = {}
+    teachers = set()
+    preview = ""
+    for reason, teacher_id, row_preview in rows:
+        reasons[reason] = reasons.get(reason, 0) + 1
+        teachers.add(teacher_id)
+        preview = preview or (row_preview or "")
+    return {
+        "total": len(rows),
+        "reasons": reasons,
+        "teachers": len(teachers),
+        "preview": preview,
+    }

@@ -605,7 +605,10 @@ async def _trainer_screen(teacher_id: int, subject: str):
         return f"\n⚠ Не подключились файлов: {len(failed)}"
 
     has_sections = subjects_cfg.has_sections(subject) and bool(rows)
-    reported = await get_question_reports(teacher_id, subject)
+    # Общие вопросы разбирает админ — у преподавателя только свои
+    reported = content_provider.own_reports(
+        await get_question_reports(teacher_id, subject), teacher_id, subject
+    )
 
     if not rows:
         lines = ["👀 Мой тренажёр", "", "Пока пусто — загрузите свои билеты."]
@@ -795,7 +798,9 @@ def _report_card(item: dict, row: Optional[dict], pos: int, total: int) -> str:
 
 async def _reports_screen(teacher_id: int, subject: str, skipped: Sequence[str] = ()):
     """Экран разбора: одна карточка за раз, следующая приходит на место прежней."""
-    items = _sort_reports(await get_question_reports(teacher_id, subject))
+    items = _sort_reports(content_provider.own_reports(
+        await get_question_reports(teacher_id, subject), teacher_id, subject
+    ))
     pending = [i for i in items if i["question_hash"] not in set(skipped)]
 
     if not pending:

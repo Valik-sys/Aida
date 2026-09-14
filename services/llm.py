@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Optional
 
 from openai import AsyncOpenAI
 
 import config
+from services.ticket_parser import normalize_answer
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +56,73 @@ VERDICT_PARTIAL = "partial"
 VERDICT_UNKNOWN = "unknown"
 
 
+# Ответ, совпавший с эталоном, дальше модели не идёт.
+#
+# 10.09.2026 преподаватель на первом живом тесте выбрала «1 2 4», получила
+# «❌ ты ошибся» — и в том же сообщении перечень правильных: 1, 2, 4.
+# Проверка целиком висела на `gpt-4.1-nano`, и она ошиблась на точном
+# совпадении. Это худшая ошибка для доверия: после неё ученик не верит
+# ни одной проверке.
+#
+# Модель остаётся там, где она нужна, — разобрать неверный ответ и объяснить
+# словесный. Сравнить две одинаковые строки она не должна была никогда.
+_ANSWER_CHARS = re.compile(r"[^\w]+", re.UNICODE)
+_MULTI_DIGITS = re.compile(r"^[1-6]{2,6}$")
+
+
+def _looks_like_year(value: str) -> bool:
+    return bool(re.fullmatch(r"\d{4}", value)) and 1000 <= int(value) <= 2100
+
+
+def _plain(value: str) -> str:
+    """Ответ без регистра и пунктуации — для словесных ответов."""
+    return _ANSWER_CHARS.sub(" ", (value or "").casefold()).strip()
+
+
+_DIGIT_LIST = re.compile(r"^[\d\s,.;]+$")
+
+
+def _compact_digits(value: str) -> str:
+    """«1, 2, 4» → «124». Ученик перечисляет варианты как ему привычно.
+
+    Трогаем только строки из одних цифр и разделителей: в словесном ответе
+    запятая — часть текста, а не разделитель вариантов.
+    """
+    raw = (value or "").strip()
+    if raw and _DIGIT_LIST.fullmatch(raw):
+        return re.sub(r"\D", "", raw)
+    return raw
+
+
+def answers_match(student_answer: str, correct_answer: str) -> bool:
+    """Совпадает ли ответ ученика с эталоном — без обращения к модели.
+
+    Канонизация берётся у парсера (`normalize_answer`), чтобы ответ ученика
+    и ответ из файла приводились к одному виду одной и той же логикой.
+
+    Отдельно разобран многовыбор: «142» и «124» — один ответ, порядок в нём
+    не значит ничего. А вот год так сравнивать нельзя: у 1453 и 1345 те же
+    цифры, но это разные годы, поэтому годы сверяются только целиком.
+    """
+    if not (student_answer or "").strip() or not (correct_answer or "").strip():
+        return False
+
+    student = normalize_answer(_compact_digits(student_answer))
+    correct = normalize_answer(_compact_digits(correct_answer))
+    if not student or not correct:
+        return False
+    if student == correct:
+        return True
+
+    if _looks_like_year(student) or _looks_like_year(correct):
+        return False
+
+    if _MULTI_DIGITS.fullmatch(student) and _MULTI_DIGITS.fullmatch(correct):
+        return set(student) == set(correct)
+
+    return _plain(student) == _plain(correct)
+
+
 def verdict_of(response: str) -> str:
     """Что означает ответ проверки — по маркеру в начале строки.
 
@@ -83,6 +152,11 @@ async def check_test_answer(
 
     Возвращает текст ответа ученику.
     """
+    # Совпало с эталоном — отвечаем сами. Заодно мгновенно и бесплатно:
+    # верный ответ перестаёт стоить обращения к модели.
+    if answers_match(student_answer, correct_answer):
+        return "✅ Верно!"
+
     client = _get_client()
 
     if correct_answer.strip():
