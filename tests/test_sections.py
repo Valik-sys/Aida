@@ -466,7 +466,8 @@ class TestStudentSectionList:
         teacher_content.add_custom_section(TEACHER, SUBJECT, "Обобщение")
         listed = _available_sections(self._bundle([self._row("c1")]))
 
-        assert listed == [("c1", "Обобщение")]
+        # С числом вопросов: без него преподаватель не узнавал свой раздел
+        assert listed == [("c1", "Обобщение · 1")]
 
     def test_unsorted_becomes_mixed_questions(self, env):
         from bot.handlers.tests import UNSORTED_KEY, _available_sections

@@ -239,22 +239,61 @@ def topics_kb_for_upload(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+SHOW_MINE_CALLBACK = "upl:mine"
+
+
 def uploaded_kb(
     section_label: str | None = None,
     file_token: str | None = None,
+    show_mine: bool = False,
 ) -> InlineKeyboardMarkup:
     """Что можно сделать сразу после загрузки файла.
 
     В кнопке «Другой раздел» ярлык файла: без него она перекладывала бы
     тот файл, который загружали последним, а не тот, под чьим отчётом
     её нажали.
+
+    `show_mine` — ученики загруженного не видят, потому что выбраны только
+    общие материалы. Кнопка первой: без неё вся загрузка ни на что не влияет.
     """
     rows: List[List[InlineKeyboardButton]] = []
+    if show_mine:
+        rows.append([InlineKeyboardButton(
+            text="Показывать ученикам мои материалы", callback_data=SHOW_MINE_CALLBACK
+        )])
     if section_label and file_token:
         rows.append([InlineKeyboardButton(
             text="Другой раздел", callback_data=f"{SEC_PREFIX}:list:{file_token}"
         )])
     rows.append([InlineKeyboardButton(text="👀 Мой тренажёр", callback_data="trainer:root")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def move_file_kb(
+    file_token: str,
+    new_key: str,
+    new_label: str,
+    old_label: str,
+    show_mine: bool = False,
+) -> InlineKeyboardMarkup:
+    """Файл с этим именем уже лежит в другом месте — перенести или оставить.
+
+    Спрашиваем, а не переносим молча: иначе первый раздел пустеет без
+    предупреждения, и преподаватель ищет пропавшие вопросы.
+    """
+    rows: List[List[InlineKeyboardButton]] = []
+    if show_mine:
+        rows.append([InlineKeyboardButton(
+            text="Показывать ученикам мои материалы", callback_data=SHOW_MINE_CALLBACK
+        )])
+    rows.append([InlineKeyboardButton(
+        text=f"Перенести в «{short_text(new_label, 30)}»",
+        callback_data=f"upl:move:{file_token}:{new_key}",
+    )])
+    rows.append([InlineKeyboardButton(
+        text=f"Оставить в «{short_text(old_label, 30)}»",
+        callback_data=f"upl:keep:{file_token}",
+    )])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -601,12 +640,27 @@ def subjects_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+# Подпись кнопки выбора раздела. Константой, потому что её же называет
+# отчёт о загрузке, когда объясняет преподавателю, где ученик найдёт вопросы:
+# разойдутся подписи — и путь в отчёте поведёт на несуществующую кнопку.
+BTN_BY_SECTION = "🗂 По разделу"
+
+# Пометка у пустого раздела или темы. Такие видит только сам преподаватель:
+# иначе созданный, но пока пустой раздел выглядит так, будто не сохранился.
+EMPTY_PLACE_MARK = "пока пусто"
+
+
+def with_count(label: str, count: int) -> str:
+    """Подпись места с числом вопросов: «Обобщающие вопросы · 75»."""
+    return f"{label} · {count}" if count else f"{label} · {EMPTY_PLACE_MARK}"
+
+
 def tests_root_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🎯 Полный билет · 38 вопросов", callback_data="tests:ticket")],
             [InlineKeyboardButton(text="✍️ Только часть Б", callback_data="tests:part_b")],
-            [InlineKeyboardButton(text="🗂 По разделу", callback_data="tests:by_section")],
+            [InlineKeyboardButton(text=BTN_BY_SECTION, callback_data="tests:by_section")],
             [InlineKeyboardButton(text="📚 Тесты прошлых лет", callback_data="tests:archive")],
             [
                 InlineKeyboardButton(text="Как это работает", callback_data="help:tests"),
@@ -645,7 +699,7 @@ def student_topics_kb(topics: Sequence, section_key: str) -> InlineKeyboardMarku
 
     for key, label, count in topics:
         rows.append([InlineKeyboardButton(
-            text=f"{sections_lib.button_label(label)} · {count}",
+            text=with_count(sections_lib.button_label(label), count),
             callback_data=f"tests:section:{key}",
         )])
 

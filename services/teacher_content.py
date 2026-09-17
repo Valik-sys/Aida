@@ -432,6 +432,16 @@ def counts_by_section(tg_id: int, subject: str) -> Dict[str, int]:
     return counts
 
 
+def upload_name(original_name: str) -> str:
+    """Под каким именем файл ляжет в uploads/.
+
+    Нужно знать заранее, до сохранения: файл с тем же именем заменяет
+    прежний, и прежде чем заменить, надо спросить, где тот лежал.
+    """
+    suffix = docx_tools.suffix_of(original_name) or ".docx"
+    return f"{docx_tools.safe_stem(original_name)}{suffix}"
+
+
 def store_upload(tg_id: int, subject: str, tmp_path: Path, original_name: str) -> tuple[Path, int, int]:
     """Кладёт файл в uploads/, вычистив картинки. Возвращает (путь, было, стало).
 
@@ -442,7 +452,7 @@ def store_upload(tg_id: int, subject: str, tmp_path: Path, original_name: str) -
     uploads_dir = storage.teacher_uploads_dir(tg_id, subject)
     uploads_dir.mkdir(parents=True, exist_ok=True)
     suffix = docx_tools.suffix_of(original_name) or ".docx"
-    target = uploads_dir / f"{docx_tools.safe_stem(original_name)}{suffix}"
+    target = uploads_dir / upload_name(original_name)
 
     if suffix == ".docx":
         before, after = docx_tools.strip_media(tmp_path, target)

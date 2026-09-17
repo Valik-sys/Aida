@@ -145,3 +145,75 @@ class TestHousekeeping:
             await db.commit()
 
         assert await storage.get_data(KEY) == {}
+
+
+class TestIntegerKeysSurvive:
+    """Хранилище отдаёт ровно то, что в него положили.
+
+    JSON молча превращает числовые ключи в строки. Варианты ответа лежат
+    в сессии как {1: «Рим», …}: после чтения они становились {"1": …},
+    бот не находил вариант по номеру и выводил вопрос части А без вариантов.
+    Так было с 31.08 по 17.09.2026 у всех учеников — нашёл клиент.
+    """
+
+    SESSION = {
+        "test_session": {
+            "idx": 0,
+            "questions": [{
+                "type": "A",
+                "question_text": "Столицей Византийской империи был город:",
+                "expected": "3",
+                "options": {1: "Рим", 2: "Афины", 3: "Константинополь", 4: "Никея"},
+            }],
+        },
+    }
+
+    async def test_option_numbers_stay_numbers(self, storage):
+        await storage.set_data(KEY, self.SESSION)
+        data = await storage.get_data(KEY)
+
+        options = data["test_session"]["questions"][0]["options"]
+        assert options == {1: "Рим", 2: "Афины", 3: "Константинополь", 4: "Никея"}
+        assert options.get(3) == "Константинополь"
+
+    async def test_question_is_shown_with_options_after_storage(self, storage):
+        """Ровно то, что увидел ученик: вопрос после хранилища — с вариантами."""
+        from bot.handlers.tests import _format_question
+
+        await storage.set_data(KEY, self.SESSION)
+        q = (await storage.get_data(KEY))["test_session"]["questions"][0]
+        shown = _format_question(q, 1, 1)
+
+        assert "Константинополь" in shown
+        assert "Напиши номер ответа" in shown
+
+    async def test_sessions_written_before_the_fix_are_repaired(self, storage):
+        """На сервере уже лежат сессии со строковыми ключами — их тоже чиним."""
+        import aiosqlite
+        import json
+
+        await storage.set_data(KEY, {"x": 1})  # таблица создана
+        legacy = json.dumps({"test_session": {"questions": [
+            {"type": "A", "options": {"1": "Рим", "3": "Константинополь"}}
+        ]}}, ensure_ascii=False)
+        async with aiosqlite.connect(storage._db_path) as db:
+            await db.execute("UPDATE fsm_sessions SET data = ?", (legacy,))
+            await db.commit()
+
+        options = (await storage.get_data(KEY))["test_session"]["questions"][0]["options"]
+        assert options == {1: "Рим", 3: "Константинополь"}
+
+    async def test_other_digit_keys_are_left_alone(self, storage):
+        """По виду ключа не угадываем: строка из цифр вне вариантов — строка."""
+        await storage.set_data(KEY, {"schedule": {"1234567890123456": "due"}})
+        data = await storage.get_data(KEY)
+
+        assert data["schedule"] == {"1234567890123456": "due"}
+
+    async def test_update_data_keeps_numbers_too(self, storage):
+        await storage.set_data(KEY, self.SESSION)
+        await storage.update_data(KEY, {"section": "c1_c2"})
+        data = await storage.get_data(KEY)
+
+        assert data["test_session"]["questions"][0]["options"].get(1) == "Рим"
+        assert data["section"] == "c1_c2"

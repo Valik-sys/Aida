@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
 import tempfile
 from pathlib import Path
@@ -10,18 +11,21 @@ from pathlib import Path
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 import config
 import subjects as subjects_cfg
 from bot.keyboards.inline import (
     ALL_MENU_BUTTONS,
+    BTN_BY_SECTION,
     MENU_BTN_UPLOAD,
     SEC_PREFIX,
+    SHOW_MINE_CALLBACK,
     TOP_PREFIX,
     UNSORTED_KEY,
     UNSORTED_LABEL,
     WHOLE_SECTION_KEY,
+    move_file_kb,
     questions_word,
     section_confirm_kb,
     sections_kb_for_upload,
@@ -29,9 +33,10 @@ from bot.keyboards.inline import (
     uploaded_kb,
 )
 from bot.states.states import TeacherUpload
-from database.db import get_user, set_teacher_content
+from database.db import get_user, set_teacher_content, set_teacher_setting
 from database.models import ROLE_TEACHER
 from services import (
+    content_provider,
     docx_tools,
     pdf_tools,
     sections as sections_lib,
@@ -130,6 +135,79 @@ def _place_label(telegram_id: int, subject: str, key: str) -> str:
         teacher_content.custom_sections(telegram_id, subject),
         teacher_content.custom_topics(telegram_id, subject),
     )
+
+
+# ---------- Где ученик найдёт загруженное ----------
+#
+# Трое подряд загрузили вопросы и не нашли их: у одной стояли «только
+# общие материалы», у другого тест лежал на уровень глубже, в теме, а третий
+# потерял файлы, молча уехавшие в раздел, выбранный накануне. Отсюда три
+# правила ниже: отчёт называет путь ученика, предупреждает о настройке
+# и не кладёт файл по старому выбору.
+
+# Сколько держится выбранный раздел, когда файлы присылают прямо в чат.
+# Для пачки файлов этого с запасом, а вчерашний выбор уже не действует:
+# состояние бота хранится на диске до двух суток, и без срока файл через день
+# молча ложился туда, куда клали вчера.
+STICKY_MINUTES = 30
+
+HIDDEN_WARNING = (
+    "⚠️ Ученики этих вопросов пока не видят: "
+    "в настройках выбраны «Только общие материалы»."
+)
+SHOWN_NOTE = "✅ Теперь ученики видят ваши материалы."
+
+
+def _utcnow() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+
+
+def _is_fresh(value) -> bool:
+    """Выбран ли раздел недавно — в пределах одной пачки файлов."""
+    try:
+        chosen_at = dt.datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return False
+    return _utcnow() - chosen_at <= dt.timedelta(minutes=STICKY_MINUTES)
+
+
+def student_path(telegram_id: int, subject: str, key: str) -> str:
+    """Путь ученика до места — теми же подписями, что на его кнопках."""
+    parts = [subjects_cfg.MODE_LABELS["tests"], BTN_BY_SECTION]
+    if not key:
+        parts.append(UNSORTED_LABEL)
+    else:
+        parts.append(_section_label(telegram_id, subject, sections_lib.section_of(key)))
+        if sections_lib.is_topic(key):
+            parts.append(sections_lib.topic_title(
+                subject, key, teacher_content.custom_topics(telegram_id, subject)
+            ))
+    return " → ".join(parts)
+
+
+async def _hidden_from_students(telegram_id: int, subject: str) -> bool:
+    """Ученики не видят материалы преподавателя: выбраны только общие."""
+    user = await get_user(telegram_id)
+    if not user:
+        return False
+    source = await content_provider.effective_source(user, subject)
+    return source == subjects_cfg.SOURCE_BASE
+
+
+async def _where_to_find(telegram_id: int, subject: str, key: str) -> tuple[str, bool]:
+    """Хвост отчёта: где ученик найдёт вопросы и видит ли он их вообще."""
+    hidden = await _hidden_from_students(telegram_id, subject)
+    text = "Ученики найдут их так:\n" + student_path(telegram_id, subject, key)
+    if hidden:
+        text += f"\n\n{HIDDEN_WARNING}"
+    return text, hidden
+
+
+def _accepted_of(telegram_id: int, subject: str, filename: str) -> int:
+    for item in teacher_content.load_manifest(telegram_id, subject).get("files") or []:
+        if str(item.get("filename")) == filename:
+            return int(item.get("accepted") or 0)
+    return 0
 
 
 async def _start_upload(message: Message, state: FSMContext, subject: str) -> None:
@@ -266,8 +344,24 @@ async def handle_document(message: Message, state: FSMContext) -> None:
 
     # Раздел, выбранный в этой сессии загрузки. Пока он держится, следующие
     # файлы кладутся туда же и вопрос не повторяется — так грузят пачками.
+    # Держится он полчаса: вчерашний выбор молча уводил файлы не туда.
+    # Если же преподаватель выбрал место и бот ждёт файл — место действует,
+    # сколько бы времени ни прошло.
     data = await state.get_data()
     session_section = data.get("section")
+    waiting = await state.get_state() == TeacherUpload.waiting_file.state
+    if session_section is not None and not waiting and not _is_fresh(data.get("section_at")):
+        session_section = None
+
+    # Файл с тем же именем заменяет прежний. Если прежний лежал в другом
+    # месте, молча переносить нельзя — его раздел опустеет без объяснений
+    name = teacher_content.upload_name(doc.file_name or "")
+    previous = teacher_content.file_sections(telegram_id, subject).get(name)
+    moving = (
+        previous is not None
+        and session_section is not None
+        and previous != session_section
+    )
 
     status = await message.answer("⏳ Читаю файл…")
 
@@ -282,7 +376,13 @@ async def handle_document(message: Message, state: FSMContext) -> None:
         )
 
         await status.edit_text("⏳ Разбираю билеты…")
-        assign = {target.name: session_section} if session_section is not None else None
+        if moving:
+            # Пока преподаватель не решил — файл остаётся, где был
+            assign = {target.name: previous}
+        elif session_section is not None:
+            assign = {target.name: session_section}
+        else:
+            assign = None
         result = await asyncio.to_thread(
             teacher_content.rebuild, telegram_id, subject, assign
         )
@@ -305,29 +405,53 @@ async def handle_document(message: Message, state: FSMContext) -> None:
         accepted = next(
             (f.accepted for f in result.files if f.filename == target.name), 0
         )
+        # Знакомый файл спрашивать не о чем: место у него уже есть
         ask_section = (
             session_section is None
+            and previous is None
             and accepted > 0
             and subjects_cfg.has_sections(subject)
         )
+        token = teacher_content.file_token(target.name)
 
         if ask_section:
             await _ask_section(message, state, subject, result, target.name)
-        else:
-            label = (
-                _place_label(telegram_id, subject, session_section)
-                if session_section else None
+            return
+
+        # Состояние снимаем, а выбранный раздел оставляем: следующий
+        # файл ляжет туда же, но подсказка «жду файл» больше не мешает
+        await state.set_state(None)
+        if session_section is not None:
+            await state.update_data(section_at=_utcnow().isoformat())
+
+        if moving:
+            old_label = _place_label(telegram_id, subject, previous)
+            new_label = _place_label(telegram_id, subject, session_section)
+            hidden = await _hidden_from_students(telegram_id, subject)
+            text = (
+                f"{_format_report(result, target.name, old_label)}\n\n"
+                f"Этот файл уже лежал здесь: {old_label}. Я обновил его на месте.\n"
+                f"Перенести в «{new_label}»?"
             )
-            report = _format_report(result, target.name, label)
-            # Состояние снимаем, а выбранный раздел оставляем: следующий
-            # файл ляжет туда же, но подсказка «жду файл» больше не мешает
-            await state.set_state(None)
-            await message.answer(
-                report,
-                reply_markup=uploaded_kb(
-                    label, teacher_content.file_token(target.name)
-                ),
-            )
+            if hidden and accepted:
+                text += f"\n\n{HIDDEN_WARNING}"
+            await message.answer(text, reply_markup=move_file_kb(
+                token, session_section, new_label, old_label,
+                show_mine=hidden and accepted > 0,
+            ))
+            return
+
+        place = session_section if session_section is not None else previous
+        label = _place_label(telegram_id, subject, place) if place is not None else None
+        report = _format_report(result, target.name, label)
+        hidden = False
+        if accepted and place is not None:
+            where, hidden = await _where_to_find(telegram_id, subject, place)
+            report += f"\n\n{where}"
+        await message.answer(
+            report,
+            reply_markup=uploaded_kb(label, token, show_mine=hidden),
+        )
 
     except (docx_tools.DocxError, pdf_tools.PdfError) as exc:
         await status.delete()
@@ -683,7 +807,8 @@ async def _apply_place(
         # Раздел выбран до файла — запоминаем и ждём документ
         await state.set_state(TeacherUpload.waiting_file)
         await state.update_data(
-            section=key, sec_flow=None, sec_target=None, sec_section=None
+            section=key, section_at=_utcnow().isoformat(),
+            sec_flow=None, sec_target=None, sec_section=None,
         )
         await _show(
             message,
@@ -708,19 +833,26 @@ async def _apply_place(
             )
         return
 
-    # Загрузка: запоминаем выбор на остаток сессии
+    # Загрузка: запоминаем выбор на остаток пачки
     await state.set_state(None)
-    await state.update_data(section=key, sec_flow=None, sec_target=None)
+    await state.update_data(
+        section=key, section_at=_utcnow().isoformat(), sec_flow=None, sec_target=None
+    )
 
-    tail = (
-        "Следующие файлы буду класть туда же."
-        if key
-        else f"Ученик найдёт их в тренировке по разделам, в «{UNSORTED_LABEL}»."
+    lines = [f"Готово: «{target}» → {label}"]
+    hidden = False
+    if _accepted_of(telegram_id, subject, target):
+        where, hidden = await _where_to_find(telegram_id, subject, key)
+        lines.append(where)
+    lines.append(
+        f"Файлы, присланные в ближайшие {STICKY_MINUTES} минут, положу туда же."
     )
     await _show(
         message,
-        f"Готово: «{target}» → {label}\n\n{tail}",
-        reply_markup=uploaded_kb(label, teacher_content.file_token(target)),
+        "\n\n".join(lines),
+        reply_markup=uploaded_kb(
+            label, teacher_content.file_token(target), show_mine=hidden
+        ),
     )
 
 
@@ -777,6 +909,105 @@ async def waiting_file_hint(message: Message, state: FSMContext) -> None:
     await message.answer(
         "Жду файл с билетами — .docx или PDF.\n"
         "Чтобы выйти — нажмите любую кнопку меню или отправьте /menu.",
+    )
+
+
+# ---------- Кнопки под отчётом о загрузке ----------
+
+def _without_show_mine(markup) -> InlineKeyboardMarkup | None:
+    """Та же клавиатура, но без кнопки «Показывать ученикам мои материалы»."""
+    if not markup:
+        return None
+    rows = [
+        row for row in markup.inline_keyboard
+        if not any(button.callback_data == SHOW_MINE_CALLBACK for button in row)
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+
+
+@router.callback_query(F.data == SHOW_MINE_CALLBACK)
+async def show_mine(callback: CallbackQuery) -> None:
+    """Переключить материалы тренажёра на свои прямо из отчёта о загрузке.
+
+    Выбираем «мои, а пока их нет — общие»: свои у преподавателя уже есть,
+    ученики увидят именно их, а если файлы когда-нибудь удалят — тренажёр
+    не опустеет, а вернётся к общим вопросам.
+    """
+    subject = await _teacher_subject(callback.from_user.id)
+    if not subject:
+        await callback.answer()
+        return
+
+    allowed = subjects_cfg.allowed_sources(subject)
+    value = (
+        subjects_cfg.SOURCE_TEACHER_THEN_BASE
+        if subjects_cfg.SOURCE_TEACHER_THEN_BASE in allowed
+        else subjects_cfg.SOURCE_TEACHER
+    )
+    await set_teacher_setting(
+        callback.from_user.id, subject, content_provider.MATERIALS_SOURCE, value
+    )
+    await callback.answer("Готово — ученики видят ваши материалы")
+
+    text = (callback.message.text or "").replace(HIDDEN_WARNING, SHOWN_NOTE)
+    try:
+        await callback.message.edit_text(
+            text, reply_markup=_without_show_mine(callback.message.reply_markup)
+        )
+    except Exception:  # noqa: BLE001
+        # Сообщение слишком старое, чтобы его править, — настройка всё равно сохранена
+        pass
+
+
+@router.callback_query(
+    lambda c: (c.data or "").startswith(("upl:move:", "upl:keep:"))
+)
+async def move_decision(callback: CallbackQuery, state: FSMContext) -> None:
+    """Файл с тем же именем уже лежал в другом месте: перенести или оставить."""
+    subject = await _teacher_subject(callback.from_user.id)
+    await callback.answer()
+    if not subject:
+        return
+
+    telegram_id = callback.from_user.id
+    parts = (callback.data or "").split(":", 3)
+    action, token = parts[1], parts[2]
+    new_key = parts[3] if len(parts) > 3 else ""
+
+    filename = await asyncio.to_thread(
+        teacher_content.find_file_by_token, telegram_id, subject, token
+    )
+    if not filename:
+        await _show(callback.message, "Этого файла больше нет.")
+        return
+
+    if action == "move":
+        custom = teacher_content.custom_sections(telegram_id, subject)
+        custom_topics = teacher_content.custom_topics(telegram_id, subject)
+        if new_key and not sections_lib.is_valid(subject, new_key, custom, custom_topics):
+            await _show(callback.message, "Такого раздела больше нет. Выберите место заново.")
+            return
+        await asyncio.to_thread(
+            teacher_content.set_file_section, telegram_id, subject, filename, new_key
+        )
+        place = new_key
+        verb = "Перенёс"
+    else:
+        place = teacher_content.file_sections(telegram_id, subject).get(filename, "")
+        verb = "Оставил"
+        # Выбор «оставить там» — значит и следующие файлы туда, а не в новое
+        await state.update_data(section=place, section_at=_utcnow().isoformat())
+
+    label = _place_label(telegram_id, subject, place)
+    lines = [f"{verb}: «{filename}» → {label}"]
+    hidden = False
+    if _accepted_of(telegram_id, subject, filename):
+        where, hidden = await _where_to_find(telegram_id, subject, place)
+        lines.append(where)
+    await _show(
+        callback.message,
+        "\n\n".join(lines),
+        reply_markup=uploaded_kb(label, token, show_mine=hidden),
     )
 
 

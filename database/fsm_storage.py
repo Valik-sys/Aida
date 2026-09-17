@@ -117,7 +117,7 @@ class SQLiteStorage(BaseStorage):
                 data = excluded.data,
                 updated_at = excluded.updated_at
             """,
-            (key, state, json.dumps(data, ensure_ascii=False), _utcnow().isoformat()),
+            (key, state, _dumps(data), _utcnow().isoformat()),
         )
         await db.commit()
 
@@ -194,6 +194,53 @@ class SQLiteStorage(BaseStorage):
             return cursor.rowcount or 0
 
 
+# ---------- JSON без потерь ----------
+#
+# Хранилище обязано отдавать ровно то, что в него положили, — как это делал
+# MemoryStorage. JSON этого не умеет: числовые ключи словаря он молча
+# превращает в строки. Варианты ответа лежат в сессии как {1: «Рим», …},
+# после чтения становились {"1": «Рим», …}, и `options.get(1)` возвращал
+# пустоту. С 31.08 по 17.09.2026 из-за этого все вопросы части А шли
+# ученикам без вариантов, а проверка получала голый номер ответа
+# (нашёл клиент на живом тесте).
+#
+# Поэтому словарь с числовыми ключами упаковывается явно и распаковывается
+# обратно тем же типом — без угадывания по виду ключа.
+
+_INT_KEYS = "__int_keys__"
+
+
+def _pack(value: Any) -> Any:
+    if isinstance(value, dict):
+        if value and all(
+            isinstance(k, int) and not isinstance(k, bool) for k in value
+        ):
+            return {_INT_KEYS: [[k, _pack(v)] for k, v in value.items()]}
+        return {k: _pack(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_pack(v) for v in value]
+    return value
+
+
+def _unpack(value: Any, field: str = "") -> Any:
+    if isinstance(value, dict):
+        if set(value) == {_INT_KEYS}:
+            return {int(k): _unpack(v) for k, v in value[_INT_KEYS]}
+        # Сессии, записанные до этой правки: там ключи вариантов уже
+        # строками, и упаковки нет. Узнаём их по имени поля — угадывать
+        # по виду ключа везде нельзя, отпечаток вопроса тоже бывает из цифр
+        if field == "options" and value and all(str(k).isdigit() for k in value):
+            return {int(k): _unpack(v) for k, v in value.items()}
+        return {k: _unpack(v, k) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_unpack(v) for v in value]
+    return value
+
+
+def _dumps(data: Mapping[str, Any]) -> str:
+    return json.dumps(_pack(dict(data)), ensure_ascii=False)
+
+
 def _loads(raw: str, key: str) -> Dict[str, Any]:
     """Данные сессии из JSON. Битую строку не роняем, а начинаем заново.
 
@@ -201,7 +248,7 @@ def _loads(raw: str, key: str) -> Dict[str, Any]:
     без ответа. Потерять недописанную сессию неприятно, но не смертельно.
     """
     try:
-        value = json.loads(raw or "{}")
+        value = _unpack(json.loads(raw or "{}"))
     except Exception:  # noqa: BLE001
         logger.warning("Битые данные сессии %s — начинаем с чистого листа", key)
         return {}

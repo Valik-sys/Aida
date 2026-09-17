@@ -8,10 +8,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from bot.keyboards.inline import (
     ALL_MENU_BUTTONS,
+    MENU_BTN_BACK_TO_CABINET,
+    MENU_BTN_HOME,
+    MENU_BTN_UPLOAD,
     REASON_PREFIX,
     REPORT_PREFIX,
     UNSORTED_KEY,
@@ -29,6 +32,7 @@ from bot.keyboards.inline import (
     test_result_kb,
     tests_root_kb,
     variants_kb,
+    with_count,
 )
 from bot.handlers import base_reports
 from bot.states.states import TestFlow
@@ -996,12 +1000,35 @@ def _result_screen(correct: int, total: int, wrong_positions: List[str]) -> str:
     return "\n".join(lines)
 
 
-def _available_sections(bundle) -> List[Tuple[str, str]]:
+def _is_owner(bundle, telegram_id: int) -> bool:
+    """Смотрит ли на тренажёр сам преподаватель — через «Режим ученика»."""
+    return bool(bundle.teacher_id) and bundle.teacher_id == telegram_id
+
+
+def _own_places(bundle) -> set:
+    """Разделы и темы, которые преподаватель создал сам.
+
+    Ему они показываются и пустыми: созданный, но ещё пустой раздел иначе
+    просто исчезает, и кажется, что он не сохранился. Ученику пустые места
+    по-прежнему не показываются — тыкать в них незачем.
+    """
+    if not bundle.teacher_id:
+        return set()
+    sections = teacher_content.custom_sections(bundle.teacher_id, bundle.subject)
+    topics = teacher_content.custom_topics(bundle.teacher_id, bundle.subject)
+    return set(sections) | set(topics) | {sections_lib.section_of(k) for k in topics}
+
+
+def _available_sections(bundle, owner: bool = False) -> List[Tuple[str, str]]:
     """Разделы, в которых у этого ученика реально есть вопросы.
 
     Сюда попадают и свои разделы преподавателя, и «смешанные вопросы» —
     те, которым раздел не назначен. Обычно это полные билеты, где разделы
     перемешаны: назначить им один нельзя, а тренироваться на них нужно.
+
+    Рядом с разделом — сколько в нём вопросов. Без числа преподаватель
+    не узнавал свой тест: название файла живёт на уровень ниже, в теме,
+    и в раздел он просто не заходил (клиент, 17.09.2026).
     """
     # Вопрос, разложенный по теме, считается и за свой раздел: иначе раздел,
     # где всё разложено по темам, выглядел бы пустым и в список бы не попал.
@@ -1013,28 +1040,69 @@ def _available_sections(bundle) -> List[Tuple[str, str]]:
     custom: Dict[str, str] = {}
     if bundle.teacher_id:
         custom = teacher_content.custom_sections(bundle.teacher_id, bundle.subject)
+    own = _own_places(bundle) if owner else set()
 
     out: List[Tuple[str, str]] = []
     for section in sections_lib.merged(bundle.subject, custom):
-        if not counts.get(section.key):
+        count = counts.get(section.key, 0)
+        if not count and section.key not in own:
             continue
-        # У разделов программы название полное — ученик узнаёт его по учебнику
-        full = next(
-            (s.full for s in sections_lib.base_sections(bundle.subject) if s.key == section.key),
-            "",
-        )
-        out.append((section.key, full or section.label))
+        # Короткое название, а не полное: полное на телефоне обрезается,
+        # и вместе с ним пропадало бы число вопросов. Полное стоит
+        # в заголовке следующего экрана, где места хватает.
+        out.append((section.key, with_count(section.label, count)))
 
     if counts.get(""):
-        out.append((UNSORTED_KEY, UNSORTED_LABEL))
+        out.append((UNSORTED_KEY, with_count(UNSORTED_LABEL, counts[""])))
 
     return out
+
+
+def _section_heading(bundle, section: str) -> str:
+    """Заголовок раздела: полное название программы или название своего.
+
+    Раньше свой раздел назывался здесь «Раздел c1»: подпись бралась без
+    своих разделов преподавателя, и вместо названия выходил служебный ключ.
+    """
+    full = next(
+        (s.full for s in sections_lib.base_sections(bundle.subject) if s.key == section),
+        "",
+    )
+    if full:
+        return full
+    custom = (
+        teacher_content.custom_sections(bundle.teacher_id, bundle.subject)
+        if bundle.teacher_id else {}
+    )
+    return sections_lib.title_of(bundle.subject, section, custom)
+
+
+def _count_in(bundle, key: str) -> int:
+    """Сколько вопросов у ученика в разделе или теме."""
+    match_key = "" if key == UNSORTED_KEY else key
+    return sum(1 for r in bundle.rows if _match_section(r.get("Раздел", ""), match_key))
+
+
+async def _show_empty_place(callback: CallbackQuery, bundle, key: str) -> None:
+    """Свой раздел или тема без вопросов — подсказать, как их туда положить."""
+    custom_topics = teacher_content.custom_topics(bundle.teacher_id, bundle.subject)
+    custom = teacher_content.custom_sections(bundle.teacher_id, bundle.subject)
+    place = sections_lib.place_title(bundle.subject, key, custom, custom_topics)
+    await callback.message.edit_text(
+        f"«{place}» — пока нет вопросов.\n\n"
+        "Ученикам пустое место не показывается. Чтобы добавить вопросы:\n"
+        f"{MENU_BTN_BACK_TO_CABINET} → {MENU_BTN_UPLOAD} → {place}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="← Назад к разделам", callback_data="tests:by_section")],
+            [InlineKeyboardButton(text=MENU_BTN_HOME, callback_data="menu:back_to_main")],
+        ]),
+    )
 
 
 @router.callback_query(lambda c: c.data == "tests:by_section")  # type: ignore[call-arg]
 async def by_section(callback: CallbackQuery, state: FSMContext) -> None:
     bundle = await content_provider.get_tests(callback.from_user.id)
-    available = _available_sections(bundle)
+    available = _available_sections(bundle, owner=_is_owner(bundle, callback.from_user.id))
 
     if not available:
         await callback.message.edit_text(
@@ -1196,11 +1264,12 @@ async def _deal_ticket(
     await callback.answer()
 
 
-def _available_topics(bundle, section: str) -> List[Tuple[str, str, int]]:
+def _available_topics(bundle, section: str, owner: bool = False) -> List[Tuple[str, str, int]]:
     """Темы этого раздела, в которых у ученика есть вопросы.
 
     Пустые темы не показываем по той же причине, что и пустые разделы:
     из пятидесяти семи тем программы у преподавателя обычно разложены три.
+    Исключение — свои пустые темы, когда смотрит сам преподаватель.
     """
     counts: Dict[str, int] = {}
     for row in bundle.rows:
@@ -1208,7 +1277,10 @@ def _available_topics(bundle, section: str) -> List[Tuple[str, str, int]]:
         if sections_lib.is_topic(key) and sections_lib.section_of(key) == section:
             counts[key] = counts.get(key, 0) + 1
 
-    if not counts:
+    own = _own_places(bundle) if owner else set()
+    if not counts and not any(
+        sections_lib.is_topic(k) and sections_lib.section_of(k) == section for k in own
+    ):
         return []
 
     custom_topics: Dict[str, str] = {}
@@ -1217,8 +1289,8 @@ def _available_topics(bundle, section: str) -> List[Tuple[str, str, int]]:
 
     out: List[Tuple[str, str, int]] = []
     for topic in sections_lib.merged_topics(bundle.subject, section, custom_topics):
-        count = counts.get(topic.key)
-        if count:
+        count = counts.get(topic.key, 0)
+        if count or topic.key in own:
             out.append((topic.key, topic.title, count))
     return out
 
@@ -1226,7 +1298,7 @@ def _available_topics(bundle, section: str) -> List[Tuple[str, str, int]]:
 async def _show_topics(callback: CallbackQuery, bundle, section: str, topics) -> None:
     """Экран выбора темы внутри раздела."""
     await callback.message.edit_text(
-        f"{sections_lib.title_of(bundle.subject, section)}\n\nВыбери тему:",
+        f"{_section_heading(bundle, section)}\n\nВыбери тему:",
         reply_markup=student_topics_kb(topics, section),
     )
 
@@ -1238,15 +1310,24 @@ async def pick_section(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer()
         return
 
+    bundle = await content_provider.get_tests(callback.from_user.id)
+    owner = _is_owner(bundle, callback.from_user.id)
+
     # У «смешанных вопросов» тем нет по определению — там вопросы разных
     # разделов вперемешку.
     if key != UNSORTED_KEY and not sections_lib.is_topic(key):
-        bundle = await content_provider.get_tests(callback.from_user.id)
-        topics = _available_topics(bundle, key)
+        topics = _available_topics(bundle, key, owner=owner)
         if topics:
             await _show_topics(callback, bundle, key, topics)
             await callback.answer()
             return
+
+    # Пустым может оказаться только своё место преподавателя — ученику
+    # такие не показываются. Вместо тренировки из ничего — подсказка
+    if owner and not _count_in(bundle, key):
+        await _show_empty_place(callback, bundle, key)
+        await callback.answer()
+        return
 
     await _ask_quantity(callback, state, key)
 
@@ -1295,7 +1376,9 @@ async def qty_back(callback: CallbackQuery, state: FSMContext) -> None:
         if value != UNSORTED_KEY:
             bundle = await content_provider.get_tests(callback.from_user.id)
             section = sections_lib.section_of(value)
-            topics = _available_topics(bundle, section)
+            topics = _available_topics(
+                bundle, section, owner=_is_owner(bundle, callback.from_user.id)
+            )
             # Темы есть — значит через их список мы сюда и попали
             if topics:
                 await _show_topics(callback, bundle, section, topics)
@@ -1315,6 +1398,11 @@ async def pick_section_whole(callback: CallbackQuery, state: FSMContext) -> None
     """Весь раздел целиком, минуя список тем."""
     key = (callback.data or "").split(":")[-1].strip()
     if not key:
+        await callback.answer()
+        return
+    bundle = await content_provider.get_tests(callback.from_user.id)
+    if _is_owner(bundle, callback.from_user.id) and not _count_in(bundle, key):
+        await _show_empty_place(callback, bundle, key)
         await callback.answer()
         return
     await _ask_quantity(callback, state, key)
