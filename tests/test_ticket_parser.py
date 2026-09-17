@@ -369,3 +369,66 @@ class TestPartHeadersAndKeyEnd:
         by_marker = {f"{q.part}{q.num}": q for q in questions}
         assert by_marker["А1"].expected == "2"
         assert by_marker["В1"].expected == "Метрополия"
+
+
+class TestHandTypedOptionNumbers:
+    """Варианты с номером, набранным руками без скобки: «1 Хозяйство…».
+
+    Бот нумерует варианты сам, и номер из файла выходил дважды:
+    «1️⃣ 1 Хозяйство…» (клиент, 17.09.2026).
+    """
+
+    def _options(self, lines):
+        from services.ticket_parser import parse_lines
+
+        questions, _a, _b = parse_lines(
+            ["А1. Что такое натуральное хозяйство?"] + lines + ["Ответы:", "А1 — 2; А2 — 1"]
+        )
+        return [o for o in questions[0].options if o]
+
+    def test_space_after_number(self):
+        assert self._options([
+            "1 Хозяйство, ориентированное на продажу",
+            "2 Хозяйство для собственных нужд",
+            "3 Хозяйство с наёмным трудом",
+        ]) == [
+            "Хозяйство, ориентированное на продажу",
+            "Хозяйство для собственных нужд",
+            "Хозяйство с наёмным трудом",
+        ]
+
+    def test_tab_and_dot_after_number(self):
+        assert self._options(["1\tРим", "2\tАфины"]) == ["Рим", "Афины"]
+        assert self._options(["1. Рим", "2. Афины"]) == ["Рим", "Афины"]
+
+    def test_option_starting_with_a_number_is_kept(self):
+        """Дата в варианте — не номер: лесенки 1, 2, 3 у соседей нет."""
+        # Точку в конце варианта парсер срезает всегда — это не про номер
+        assert self._options([
+            "1 сентября 1939 г.",
+            "22 июня 1941 г.",
+        ]) == ["1 сентября 1939 г", "22 июня 1941 г"]
+
+    def test_decimal_is_not_a_number_marker(self):
+        assert self._options(["1.5 млн человек", "2.5 млн человек"]) == [
+            "1.5 млн человек", "2.5 млн человек",
+        ]
+
+    def test_plain_options_untouched(self):
+        assert self._options(["Рим", "Афины"]) == ["Рим", "Афины"]
+
+    def test_answer_still_points_to_the_right_option(self):
+        from services.ticket_parser import parse_lines, validate
+
+        questions, _a, _b = parse_lines([
+            "А1. Столицей Византийской империи был город:",
+            "1 Рим", "2 Афины", "3 Константинополь", "4 Никея",
+            "Ответы:", "А1 — 3",
+        ])
+        q = questions[0]
+        assert q.options[q_index(q.expected)] == "Константинополь"
+        assert validate(q) is None
+
+
+def q_index(expected: str) -> int:
+    return int(expected) - 1

@@ -33,7 +33,9 @@ logger = logging.getLogger(__name__)
 #     Накопленное стоит перегнать через /reparse: разбор изменился.
 # 4 — «Часть В:» с двоеточием снова граница частей, а не вариант ответа;
 #     ключ кончается там, где начинается обычный текст под ним.
-PARSER_VERSION = 4
+# 5 — ручная нумерация вариантов без скобки («1 Хозяйство…») срезается,
+#     иначе номер выходил дважды. Загруженное надо перегнать через /reparse.
+PARSER_VERSION = 5
 
 # Схема строки — та же, что в таблице тестов проекта. Менять нельзя:
 # на неё завязаны хендлеры тестов.
@@ -337,6 +339,36 @@ def _split_line_by_numbers(line: str) -> List[Tuple[Optional[int], str]]:
     return result
 
 
+# Номер, набранный руками без скобки: «1 Хозяйство…», «1. Рим», «1<tab>Рим».
+# После точки обязателен пробел: иначе «1.5 млн» потерял бы «1.» и превратился
+# в «5 млн».
+_LEADING_NUMBER_RE = re.compile(r"^(\d{1,2})(?:\.\s+|\s+)(\S.*)$")
+
+
+def _strip_list_numbers(options: List[str]) -> List[str]:
+    """Убирает ручную нумерацию вариантов: «1 Хозяйство…» → «Хозяйство…».
+
+    Бот нумерует варианты сам, и номер из файла выходил вторым:
+    «1️⃣ 1 Хозяйство…» (клиент, 17.09.2026). Срезаем, только если номера
+    идут подряд с единицы у всех вариантов, — так вариант, который сам
+    начинается с числа («1 сентября 1939 г.»), останется целым: у соседних
+    вариантов такой лесенки не будет.
+    """
+    filled = [o for o in options if o]
+    if len(filled) < MIN_OPTIONS:
+        return options
+
+    stripped: List[str] = []
+    for expected, option in enumerate(filled, start=1):
+        match = _LEADING_NUMBER_RE.match(option)
+        if not match or int(match.group(1)) != expected:
+            return options
+        stripped.append(match.group(2).strip())
+
+    rest = iter(stripped)
+    return [next(rest) if o else o for o in options]
+
+
 def _extract_options_from_lines(lines: List[str]) -> Tuple[str, List[str]]:
     """Достаёт варианты ответов из строк после маркера вопроса."""
     if not lines:
@@ -373,7 +405,7 @@ def _extract_options_from_lines(lines: List[str]) -> Tuple[str, List[str]]:
     for i, v in enumerate(total[:5]):
         opts[i] = v
 
-    return q_extra, opts
+    return q_extra, _strip_list_numbers(opts)
 
 
 def parse_paragraphs(docx_path: Path) -> Tuple[List[ParsedQuestion], Dict[str, str], Dict[str, str]]:
