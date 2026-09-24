@@ -23,7 +23,7 @@ from database.db import (
     question_hash,
 )
 from database.models import ROLE_TEACHER, User
-from services import reports, teacher_content
+from services import reports, sections as sections_lib, teacher_content
 from services.sheets import sheets_cache
 
 
@@ -202,6 +202,27 @@ async def _drop_reported(
     return kept
 
 
+def _drop_hidden_places(
+    rows: List[Dict[str, str]], teacher_id: Optional[int], subject: str
+) -> List[Dict[str, str]]:
+    """Убирает вопросы из разделов и тем, которые преподаватель скрыл.
+
+    Скрывают стандартную сетку, когда своя программа устроена иначе
+    (клиент, 24.09.2026: 52 темы в 8 разделах вместо наших 57). Своих
+    файлов в скрытом месте не бывает — экран не даёт скрыть место, пока
+    их не переложили, — поэтому здесь уходят только общие вопросы.
+    """
+    if not rows or not teacher_id:
+        return rows
+    hidden = teacher_content.hidden_places(teacher_id, subject)
+    if not hidden:
+        return rows
+    return [
+        r for r in rows
+        if not sections_lib.is_hidden((r.get("Раздел") or "").strip(), hidden)
+    ]
+
+
 async def get_tests(telegram_id: int) -> ContentBundle:
     """Вопросы для теста по политике предмета."""
     user = await get_user(telegram_id)
@@ -219,6 +240,7 @@ async def get_tests(telegram_id: int) -> ContentBundle:
         # Убранное преподавателем прячется и в общем наборе: скрытие
         # хранится по нему, чужих учеников оно не касается
         rows = await _drop_reported(rows, user, teacher_id)
+        rows = _drop_hidden_places(rows, teacher_id, subject)
         return ContentBundle(
             rows=rows,
             source=subjects_cfg.SOURCE_BASE,
@@ -238,6 +260,7 @@ async def get_tests(telegram_id: int) -> ContentBundle:
         rows = teacher_content.load_tests(teacher_id, subject) if teacher_id else []
         if rows:
             rows = await _drop_reported(rows, user, teacher_id)
+            rows = _drop_hidden_places(rows, teacher_id, subject)
             return ContentBundle(
                 rows=rows,
                 source=subjects_cfg.SOURCE_TEACHER,
@@ -251,6 +274,7 @@ async def get_tests(telegram_id: int) -> ContentBundle:
             base_rows = list(sheets_cache.base_tests_rows)
             if base_rows:
                 base_rows = await _drop_reported(base_rows, user, teacher_id)
+                base_rows = _drop_hidden_places(base_rows, teacher_id, subject)
                 return ContentBundle(
                     rows=base_rows,
                     source=subjects_cfg.SOURCE_BASE,

@@ -35,7 +35,9 @@ logger = logging.getLogger(__name__)
 #     ключ кончается там, где начинается обычный текст под ним.
 # 5 — ручная нумерация вариантов без скобки («1 Хозяйство…») срезается,
 #     иначе номер выходил дважды. Загруженное надо перегнать через /reparse.
-PARSER_VERSION = 5
+# 6 — ответ прямо под вопросом («Ответ 5»), автонумерация Word у вариантов,
+#     перенос строки внутри абзаца. Загруженное надо перегнать через /reparse.
+PARSER_VERSION = 6
 
 # Схема строки — та же, что в таблице тестов проекта. Менять нельзя:
 # на неё завязаны хендлеры тестов.
@@ -73,6 +75,60 @@ _part_boundary_re = re.compile(
     r"^\s*Часть\s*[АБВAB]\s*[:.\-–—]?\s*$", re.IGNORECASE
 )
 
+# Ответ прямо под вопросом: «Ответ 5», «Ответ: 124», «Отв. — ГБВА»,
+# «Правильный ответ: Вильно». Так пишут те, кто печатает билеты для себя:
+# ответ рядом с вопросом, ключа в конце нет (клиент, 24.09.2026 — «бот
+# не принимает файл, если ответы стоят после каждого вопроса»).
+#
+# Слово «Ответ» встречается и в самом задании: «Ответ запишите цифрами
+# в порядке возрастания». Такая строка ответом не считается — её выдаёт
+# глагол-инструкция сразу после слова и длина.
+_INLINE_ANSWER_MAX = 60
+_inline_answer_re = re.compile(
+    r"^(?:правильный\s+|верный\s+)?(?:ответ(?![а-яё])|отв\.)\s*[:.\-–—]?\s*(?P<val>\S.*?)\s*$",
+    re.IGNORECASE,
+)
+_answer_instruction_re = re.compile(
+    r"^(?:запиш|впиш|пиш|дай|укаж|введ|выбер|отмет|обвед|округл|обоснуй|поясн"
+    r"|долж|нуж|надо|в\s+вид|следует|необходимо)",
+    re.IGNORECASE,
+)
+# Ответ в конце строки с текстом: «…это ___ род. Ответ  МАТЕРИНСКИЙ».
+# Здесь условие строже, чем для отдельной строки: слово «Ответ» посреди
+# задания встречается часто, поэтому ответом считается только то, что
+# ответом выглядит — номера, буквы с цифрами, слово заглавными.
+_answer_tail_re = re.compile(
+    r"^(?P<body>.*\S)\s+(?:Ответ|ОТВЕТ)\s*[:\-–—]?\s*"
+    r"(?P<val>\d{1,6}|[АБВГДЕ]{2,6}|(?:[АБВГДЕ]\d){2,}|[А-ЯЁ]{2,}(?:[\s-][А-ЯЁ]{2,})*)\.?\s*$"
+)
+
+
+def inline_answer(line: str) -> Optional[str]:
+    """Ответ, если строка — это «Ответ …» под вопросом, иначе None.
+
+    Пустая заготовка «Ответ:» (бланк, куда ученик впишет ответ) даёт "":
+    строка не ответ, но и в текст вопроса ей идти незачем.
+    """
+    text = (line or "").strip()
+    if re.fullmatch(r"(?:ответ|отв\.)\s*[:.\-–—]*", text, flags=re.IGNORECASE):
+        return ""
+    m = _inline_answer_re.match(text)
+    if not m:
+        return None
+    val = m.group("val").strip()
+    if len(val) > _INLINE_ANSWER_MAX or _answer_instruction_re.match(val):
+        return None
+    return val
+
+
+def _split_answer_tail(line: str) -> Tuple[str, Optional[str]]:
+    """Отрезает ответ, дописанный в конец строки задания."""
+    m = _answer_tail_re.match(line or "")
+    if not m:
+        return line, None
+    return m.group("body"), m.group("val")
+
+
 # Задания, которые НЕ разбиваются на варианты
 _no_split_re = re.compile(
     r"(определите\s+(верно\s+)?последовательность"
@@ -99,15 +155,234 @@ _option_marker_re = re.compile(
 
 # ---------- Чтение документа ----------
 
-def _iter_docx_paragraphs(docx_path: Path, keep_tabs: bool = False) -> List[str]:
-    doc = Document(str(docx_path))
+# Буквы для автонумерации Word. Русский алфавит в списках Word идёт без
+# «ё», «й», «ъ», «ы», «ь» — так же, как пишут варианты руками.
+_RU_LIST_LETTERS = "абвгдежзиклмнопрстуфхцчшщэюя"
+_LATIN_LIST_LETTERS = "abcdefghijklmnopqrstuvwxyz"
+
+
+def _list_label(fmt: str, n: int) -> Optional[str]:
+    if fmt == "decimal":
+        return str(n)
+    letters = {
+        "russianLower": _RU_LIST_LETTERS,
+        "russianUpper": _RU_LIST_LETTERS.upper(),
+        "lowerLetter": _LATIN_LIST_LETTERS,
+        "upperLetter": _LATIN_LIST_LETTERS.upper(),
+    }.get(fmt)
+    if letters and 1 <= n <= len(letters):
+        return letters[n - 1]
+    return None
+
+
+class _ListNumbering:
+    """Номера автоматических списков Word.
+
+    Word не хранит номер в тексте абзаца: «1)» рисуется при показе. Без этого
+    варианты, набранные автосписком, приходили голым текстом — и в части В,
+    где варианты стоят в тексте вопроса, ученик видел перечень без номеров
+    при ответе «134» (клиент, 24.09.2026).
+
+    Счёт ведётся по каждому списку отдельно, с его начального номера:
+    у каждого вопроса свой список, а продолжение («4) … 5) …» на второй
+    строке) заводится как список с началом 4. Абзацы надо подавать в порядке
+    документа — иначе счёт собьётся.
+    """
+
+    def __init__(self, doc) -> None:
+        from docx.oxml.ns import qn
+
+        self._qn = qn
+        self._counters: Dict[Tuple[str, str], int] = {}
+        try:
+            numbering = doc.part.numbering_part.element
+        except (KeyError, NotImplementedError, AttributeError):
+            numbering = None
+        if numbering is None:
+            self._abstract, self._nums = {}, {}
+            return
+        self._abstract = {
+            an.get(qn("w:abstractNumId")): an
+            for an in numbering.findall(qn("w:abstractNum"))
+        }
+        self._nums = {n.get(qn("w:numId")): n for n in numbering.findall(qn("w:num"))}
+
+    def _level(self, num_id: str, ilvl: str):
+        qn = self._qn
+        num = self._nums.get(num_id)
+        if num is None:
+            return None, 1
+        start_override = None
+        for ov in num.findall(qn("w:lvlOverride")):
+            if ov.get(qn("w:ilvl")) == ilvl:
+                so = ov.find(qn("w:startOverride"))
+                if so is not None:
+                    start_override = int(so.get(qn("w:val")))
+        abs_ref = num.find(qn("w:abstractNumId"))
+        abs_el = self._abstract.get(abs_ref.get(qn("w:val"))) if abs_ref is not None else None
+        if abs_el is None:
+            return None, 1
+        for lvl in abs_el.findall(qn("w:lvl")):
+            if lvl.get(qn("w:ilvl")) == ilvl:
+                start_el = lvl.find(qn("w:start"))
+                start = int(start_el.get(qn("w:val"))) if start_el is not None else 1
+                return lvl, start_override if start_override is not None else start
+        return None, 1
+
+    def restart(self) -> None:
+        """Новый вопрос — списки заново с начала.
+
+        У списка, заданного стилем, один номер на весь документ, и Word
+        продолжает счёт: варианты второго вопроса выходили бы 6)–10),
+        а разбор вариантов понимает только 1–5. Преподаватель видит у себя
+        то же самое, но думает о вариантах вопроса, а не о сквозном счёте.
+        """
+        self._counters.clear()
+
+    @staticmethod
+    def _num_pr(paragraph):
+        """Список задан у абзаца или у его стиля («Нумерованный список»)."""
+        p_pr = paragraph._p.pPr
+        if p_pr is not None and p_pr.numPr is not None:
+            return p_pr.numPr
+        try:
+            style = paragraph.style
+        except (KeyError, ValueError, AttributeError):
+            return None
+        depth = 0
+        while style is not None and depth < 10:
+            s_pr = style.element.pPr
+            if s_pr is not None and s_pr.numPr is not None:
+                return s_pr.numPr
+            style = style.base_style
+            depth += 1
+        return None
+
+    def label(self, paragraph) -> str:
+        """Номер абзаца в списке («1)», «а.») или "", если он не в списке."""
+        qn = self._qn
+        num_pr = self._num_pr(paragraph)
+        if num_pr is None or num_pr.numId is None:
+            return ""
+        num_id = str(num_pr.numId.val)
+        if num_id == "0":  # «нумерация снята» у абзаца со списочным стилем
+            return ""
+        ilvl = str(num_pr.ilvl.val) if num_pr.ilvl is not None else "0"
+        lvl, start = self._level(num_id, ilvl)
+        if lvl is None:
+            return ""
+
+        key = (num_id, ilvl)
+        self._counters[key] = self._counters[key] + 1 if key in self._counters else start
+        # Вложенные уровни после возврата на верхний начинаются заново
+        for other in [k for k in self._counters if k[0] == num_id and int(k[1]) > int(ilvl)]:
+            del self._counters[other]
+
+        fmt_el = lvl.find(qn("w:numFmt"))
+        text_el = lvl.find(qn("w:lvlText"))
+        value = _list_label(
+            fmt_el.get(qn("w:val")) if fmt_el is not None else "", self._counters[key]
+        )
+        pattern = text_el.get(qn("w:val")) if text_el is not None else ""
+        placeholder = f"%{int(ilvl) + 1}"
+        if value is None or placeholder not in pattern:
+            return ""
+        return pattern.replace(placeholder, value)
+
+
+def _paragraph_lines(text: str, label: str, keep_tabs: bool) -> List[str]:
+    """Строки одного абзаца: номер списка впереди, перенос строки — граница.
+
+    Перенос строки внутри абзаца (Shift+Enter) на экране — новая строка, и
+    разбирать его надо так же. Иначе «…теорией / Ответ 2» в одном абзаце
+    склеивалось в текст последнего варианта.
+    """
+    text = text or ""
+    if label and text.strip():
+        text = f"{label} {text.lstrip()}"
     out: List[str] = []
-    for p in doc.paragraphs:
-        t = (p.text or "").strip()
+    for t in text.split("\n"):
+        t = t.strip()
         if not keep_tabs:
             t = re.sub(r"\t+", " ", t)
         if t:
             out.append(t)
+    return out
+
+
+# Ячейка таблицы, где стоит только ответ «А2Б4В5», — это ключ, забытый
+# в таблице задания. Показать его ученику значит выдать ответ.
+_table_answer_cell_re = re.compile(r"^(?:[АБВГДЕABCDE]\d){2,}$")
+
+
+def _table_lines(table, numbering: "_ListNumbering", keep_tabs: bool) -> List[str]:
+    """Текст таблицы строками — по столбцам, сверху вниз.
+
+    Задания «Установите соответствие» и «Вставьте в текст» набирают
+    таблицей: слева А) Б) В), справа 1) 2) 3). Читать надо по столбцам:
+    построчно выходило бы «А) … 1) … Б) … 2) …» вперемешку, а в «Вставьте»
+    варианты разложены тройками 1-3-5 / 2-4-6 и по строкам шли бы не по
+    порядку. Объединённая ячейка (текст задания над вариантами) берётся
+    один раз.
+    """
+    grid = [list(row.cells) for row in table.rows]
+    tcs = [[cell._tc for cell in row] for row in grid]
+
+    def first_seen(r: int, c: int) -> bool:
+        """Объединённая ячейка повторяется в сетке — берём её первое место."""
+        tc = tcs[r][c]
+        for rr in range(len(tcs)):
+            for cc in range(len(tcs[rr])):
+                if tcs[rr][cc] is tc:
+                    return (rr, cc) == (r, c)
+        return True
+
+    # Номера автосписков считаются в порядке документа, то есть построчно,
+    # и только потом ячейки переставляются по столбцам.
+    cell_lines: Dict[Tuple[int, int], List[str]] = {}
+    for r, row in enumerate(grid):
+        for c, cell in enumerate(row):
+            if not first_seen(r, c):
+                continue
+            lines: List[str] = []
+            for p in cell.paragraphs:
+                lines.extend(_paragraph_lines(p.text, numbering.label(p), keep_tabs))
+            cell_lines[(r, c)] = lines
+
+    out: List[str] = []
+    width = max((len(r) for r in grid), default=0)
+    for c in range(width):
+        for r in range(len(grid)):
+            for line in cell_lines.get((r, c), []):
+                if not _table_answer_cell_re.match(line.replace(" ", "")):
+                    out.append(line)
+    return out
+
+
+def _iter_docx_paragraphs(
+    docx_path: Path, keep_tabs: bool = False, with_tables: bool = True
+) -> List[str]:
+    """Строки документа в порядке чтения — абзацы и, по желанию, таблицы.
+
+    Таблица внутри текста — часть задания: у «Установите соответствие»
+    в ней оба столбца. Без неё вопрос доходил до ученика одной строкой
+    «Установите соответствие.» (клиент, 24.09.2026: 18 таких в одном файле).
+    """
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    doc = Document(str(docx_path))
+    numbering = _ListNumbering(doc)
+    out: List[str] = []
+    for child in doc.element.body.iterchildren():
+        tag = child.tag.rsplit("}", 1)[-1]
+        if tag == "p":
+            p = Paragraph(child, doc)
+            if _question_marker_re.match(p.text or ""):
+                numbering.restart()
+            out.extend(_paragraph_lines(p.text, numbering.label(p), keep_tabs))
+        elif tag == "tbl" and with_tables:
+            out.extend(_table_lines(Table(child, doc), numbering, keep_tabs))
     return out
 
 
@@ -202,9 +477,13 @@ def _extract_part_block(text: str, part_chars: str) -> str:
 # Именно по ней узнаётся строка ключа, когда заголовка нет или он назван
 # непривычно. Требуется тире или двоеточие после номера — без этого под
 # описание попал бы любой вариант ответа вида «1) Рогволод».
+#
+# Регистр важен: маркер задания — всегда заглавная буква. Со строчной под
+# описание попадал предлог: вариант «в 24-23 тыс. до н. э.; … в 22-21-м тыс.»
+# давал две пары, строка считалась ключом, и всё ниже неё выпадало из
+# разбора (клиент, 24.09.2026: из 80 вопросов части А нашлось 25).
 _answer_pair_re = re.compile(
-    rf"[{_PART_A_CHARS}{_PART_B_CHARS}]\s*\d{{1,2}}\s*[-–—:]\s*\S",
-    re.IGNORECASE,
+    rf"(?<![^\W\d_])[{_PART_A_CHARS}{_PART_B_CHARS}]\s*\d{{1,2}}\s*[-–—:]\s*\S",
 )
 
 # Сколько пар должно быть в строке, чтобы считать её ключом. Одна пара
@@ -376,10 +655,19 @@ def _extract_options_from_lines(lines: List[str]) -> Tuple[str, List[str]]:
 
     opts_map: Dict[int, str] = {}
     unnumbered: List[str] = []
+    # Текст над вариантами, который к ним не относится: перечень событий
+    # в вопросе на последовательность («1) заселение… 2) появление…», а под
+    # ним варианты «1) 2431 2) 3214»). Раньше варианты затирали перечень,
+    # и ученик получал коды без того, к чему они относятся.
+    preface: List[str] = []
 
     for ln in lines:
         for num, text in _split_line_by_numbers(ln):
             if num is not None and 1 <= num <= 5:
+                if num == 1 and opts_map:
+                    preface.extend(unnumbered)
+                    preface.extend(f"{k}) {v}" for k, v in sorted(opts_map.items()))
+                    opts_map, unnumbered = {}, []
                 opts_map[num] = text
             elif text:
                 unnumbered.append(text)
@@ -389,10 +677,19 @@ def _extract_options_from_lines(lines: List[str]) -> Tuple[str, List[str]]:
         for idx, val in opts_map.items():
             opts[idx - 1] = val
         free_slots = [i for i in range(5) if not opts[i]]
+        # Ненумерованного больше, чем пустых мест, — лишнее стоит первым и это
+        # хвост вопроса, перенесённый на новую строку («…на территории
+        # Беларуси / являлось(-ась):»). Раньше он молча пропадал.
+        overflow = len(unnumbered) - len(free_slots)
+        if overflow > 0:
+            preface.extend(unnumbered[:overflow])
+            unnumbered = unnumbered[overflow:]
         for i, val in enumerate(unnumbered):
-            if i < len(free_slots):
-                opts[free_slots[i]] = val
-        return "", opts
+            opts[free_slots[i]] = val
+        return "\n".join(preface), opts
+
+    if preface:
+        unnumbered = preface + unnumbered
 
     q_extra = ""
     total = unnumbered
@@ -467,12 +764,26 @@ def parse_lines(
     current_marker_text: str = ""
     raw_lines_after_marker: List[str] = []
     block_lines: List[str] = []
+    # «Ответ …» под вопросом. Если в файле есть и ключ в конце, прав ключ:
+    # так было до появления ответов под вопросом, и так решено 24.09.2026.
+    current_inline: Optional[str] = None
+
+    def expected_for(key_answers: Dict[str, str], key: str) -> str:
+        from_key = key_answers.get(key, "")
+        if from_key or not current_inline:
+            return from_key
+        inline = current_inline
+        # «1, 3, 5» под вопросом пишут чаще, чем «135» в ключе
+        if re.fullmatch(r"\d(?:\s*[,;]\s*\d)+", inline):
+            inline = re.sub(r"[\s,;]", "", inline)
+        return _normalize_expected(inline)
 
     def flush() -> None:
         nonlocal current_part, current_num, current_marker_text
-        nonlocal raw_lines_after_marker, block_lines
+        nonlocal raw_lines_after_marker, block_lines, current_inline
 
         if not current_part or not current_num:
+            current_inline = None
             return
 
         if current_part == "А":
@@ -495,14 +806,14 @@ def parse_lines(
 
             questions.append(ParsedQuestion(
                 part="А", num=current_num, question_text=q_text,
-                options=opts, expected=answers_a.get(f"А{current_num}", ""),
+                options=opts, expected=expected_for(answers_a, f"А{current_num}"),
             ))
         else:
             lines = [current_marker_text.strip()] if current_marker_text.strip() else []
             lines.extend([x for x in block_lines if x.strip()])
             questions.append(ParsedQuestion(
                 part="В", num=current_num, question_text="\n".join(lines).strip(),
-                options=["", "", "", "", ""], expected=answers_b.get(f"В{current_num}", ""),
+                options=["", "", "", "", ""], expected=expected_for(answers_b, f"В{current_num}"),
             ))
 
         current_part = None
@@ -510,6 +821,7 @@ def parse_lines(
         current_marker_text = ""
         raw_lines_after_marker = []
         block_lines = []
+        current_inline = None
 
     for idx, line in enumerate(main_lines):
         line_raw = main_lines_raw[idx] if idx < len(main_lines_raw) else line
@@ -520,6 +832,16 @@ def parse_lines(
         if _part_boundary_re.match(line.strip()):
             flush()
             continue
+
+        answer = inline_answer(line)
+        if answer is not None:
+            if current_part:
+                current_inline = answer
+            continue
+
+        line, tail_answer = _split_answer_tail(line)
+        if tail_answer:
+            line_raw = _split_answer_tail(line_raw)[0] if _answer_tail_re.match(line_raw) else line
 
         m = _question_marker_re.match(line)
         if m:
@@ -532,6 +854,8 @@ def parse_lines(
             current_marker_text = m.group(3) or ""
             raw_lines_after_marker = []
             block_lines = []
+            if tail_answer:
+                current_inline = tail_answer
             continue
 
         if not current_part:
@@ -541,6 +865,8 @@ def parse_lines(
             raw_lines_after_marker.append(line_raw)
         else:
             block_lines.append(line)
+        if tail_answer:
+            current_inline = tail_answer
 
     flush()
     return questions, answers_a, answers_b
@@ -770,7 +1096,13 @@ def parse_docx(path: Path, variant: Optional[str] = None) -> ParseResult:
         source = "pdf" if questions else "none"
         return _finish(result, questions, source, variant, path)
 
-    questions, _a, _b = parse_paragraphs(path)
+    # Путь выбирается по абзацам без таблиц — как до того, как таблицы стали
+    # читаться внутри текста. Иначе файл формата обобщений, где билет целиком
+    # набран таблицей, ушёл бы в разбор абзацами вместо своего.
+    plain, _a, _b = parse_lines(
+        _iter_docx_paragraphs(path, keep_tabs=True, with_tables=False)
+    )
+    questions = parse_paragraphs(path)[0] if plain else []
     source = "paragraphs"
 
     if not questions:

@@ -818,7 +818,7 @@ def _progress_bar(pos: int, total: int) -> str:
 
 
 def _question_header(q: Dict[str, Any], pos: int, total: int) -> str:
-    part = "часть А" if q.get("type") == "A" else "часть Б"
+    part = "часть А" if q.get("type") == "A" else "часть В"
     return f"🎯 {pos}/{total} · {part}\n{_progress_bar(pos, total)}"
 
 
@@ -1257,7 +1257,7 @@ async def _deal_ticket(
         head = f"🎯 Билет: {UNSORTED_LABEL if section == UNSORTED_KEY else where}"
     await callback.message.edit_text(
         f"{note}{head}\n"
-        f"Часть А: {actual_a} · часть Б: {actual_b} · всего: {len(ticket)}\n\n"
+        f"Часть А: {actual_a} · часть В: {actual_b} · всего: {len(ticket)}\n\n"
         "Поехали!"
     )
     await _send_question(callback.bot, callback.message.chat.id, state, idx=0, user_id=callback.from_user.id)
@@ -1387,7 +1387,7 @@ async def qty_back(callback: CallbackQuery, state: FSMContext) -> None:
         await by_section(callback, state)
         return
 
-    # Часть Б и всё прочее приходят прямо из корня «Тренировки»
+    # Часть В и всё прочее приходят прямо из корня «Тренировки»
     await state.update_data(test_filter_type=None, test_filter_value=None, test_qty=None)
     await callback.message.edit_text("Режим: Тесты", reply_markup=tests_root_kb())
     await callback.answer()
@@ -1749,7 +1749,7 @@ def _find_in_session(session: Dict[str, Any], qhash: str) -> tuple:
 
 @router.callback_query(lambda c: c.data and c.data.startswith(f"{REPORT_PREFIX}:"))  # type: ignore[call-arg]
 async def report_question(callback: CallbackQuery, state: FSMContext) -> None:
-    """Кнопка «Что-то не так» и отмена. Меняем только кнопки — вопрос остаётся."""
+    """Кнопка «Проблема с вопросом» и отмена. Меняем только кнопки — вопрос остаётся."""
     parts = (callback.data or "").split(":")
     await callback.answer()
 

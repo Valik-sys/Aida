@@ -115,10 +115,14 @@ async def _teacher_subject(telegram_id: int) -> str | None:
 
 
 def _all_sections(telegram_id: int, subject: str) -> list:
-    """Разделы программы плюс свои, добавленные этим преподавателем."""
-    return sections_lib.merged(
-        subject, teacher_content.custom_sections(telegram_id, subject)
-    )
+    """Разделы программы плюс свои, кроме скрытых преподавателем."""
+    hidden = teacher_content.hidden_places(telegram_id, subject)
+    return [
+        s for s in sections_lib.merged(
+            subject, teacher_content.custom_sections(telegram_id, subject)
+        )
+        if not sections_lib.is_hidden(s.key, hidden)
+    ]
 
 
 def _section_label(telegram_id: int, subject: str, key: str) -> str:
@@ -491,6 +495,11 @@ async def _ask_section(
 
     report = _format_report(result, filename)
     suggested = sections_lib.suggest(filename, subject)
+    # Скрытый раздел не подсказываем: преподаватель сам его убрал
+    if suggested and sections_lib.is_hidden(
+        suggested, teacher_content.hidden_places(telegram_id, subject)
+    ):
+        suggested = None
 
     if suggested:
         label = _section_label(telegram_id, subject, suggested)
@@ -684,9 +693,13 @@ async def _ask_topic(
 
     telegram_id = message.chat.id
     label = _section_label(telegram_id, subject, section)
-    topics = sections_lib.merged_topics(
-        subject, section, teacher_content.custom_topics(telegram_id, subject)
-    )
+    hidden = teacher_content.hidden_places(telegram_id, subject)
+    topics = [
+        t for t in sections_lib.merged_topics(
+            subject, section, teacher_content.custom_topics(telegram_id, subject)
+        )
+        if not sections_lib.is_hidden(t.key, hidden)
+    ]
 
     await state.set_state(TeacherUpload.waiting_topic)
     await state.update_data(sec_flow=flow, sec_target=target, sec_section=section)

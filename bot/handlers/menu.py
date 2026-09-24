@@ -12,6 +12,7 @@ import config
 import subjects as subjects_cfg
 from bot.keyboards.inline import (
     MENU_BTN_ASK,
+    MENU_BTN_ASK_LEGACY,
     MENU_BTN_BACK_TO_CABINET,
     MENU_BTN_FLASHCARDS,
     MENU_BTN_HOME,
@@ -43,7 +44,6 @@ from bot.keyboards.inline import (
     teacher_cabinet_kb,
     tests_root_kb,
     trainer_kb,
-    trainer_sections_kb,
     topics_entry_kb,
     mistakes_kb,
 )
@@ -222,21 +222,25 @@ async def settings_source_set(callback: CallbackQuery) -> None:
 
 # Держим отдельно от экрана входа: длинный текст при каждом заходе мешает,
 # а один раз прочитать полезно.
+ASK_SCREEN = (
+    "🤖 ИИ-помощник\n\n"
+    "Помогает разобраться в курсе истории: объясняет темы и термины "
+    "простыми словами, напоминает даты и события, сравнивает похожие "
+    "понятия.\n\n"
+    "Как пользоваться: напиши вопрос в чат и получи ответ.\n\n"
+    "Например:\n"
+    "• Что такое фольварк?\n"
+    "• Чем Люблинская уния отличается от Кревской?"
+)
+
 MODE_HELP = {
-    "ask": (
-        "❓ Как это работает\n\n"
-        "Спрашивай что угодно по курсу — объясню своими словами, "
-        "без зубрёжки формулировок.\n\n"
-        "Отвечаю по материалам курса.\n\n"
-        "Например:\n"
-        "• чем Люблинская уния отличается от Кревской\n"
-        "• почему началось восстание Калиновского\n"
-        "• что такое фольварк"
-    ),
+    # Кнопки «Как это работает» у помощника больше нет — всё на экране входа.
+    # Запись оставлена для старых сообщений в чате, где кнопка ещё висит.
+    "ask": ASK_SCREEN,
     "tests": (
         "🎯 Как это работает\n\n"
         "Вопросы из материалов твоего преподавателя. "
-        "Часть А — выбираешь номер варианта, часть Б — пишешь ответ.\n\n"
+        "Часть А — выбираешь номер варианта, часть В — пишешь ответ.\n\n"
         "После каждого ответа сразу видно, верно или нет."
     ),
     "flashcards": (
@@ -537,12 +541,12 @@ async def student_journal(callback: CallbackQuery) -> None:
     )
 
 
-@router.message(F.text == MENU_BTN_ASK)
+@router.message(F.text.in_({MENU_BTN_ASK, MENU_BTN_ASK_LEGACY}))
 async def menu_ask(message: Message, state: FSMContext) -> None:
     await state.clear()
     if not await _guard_mode(message, "ask"):
         return
-    subject, _, _ = await _user_context(message.from_user.id)
+    subject, role, _ = await _user_context(message.from_user.id)
     if subjects_cfg.is_stub(subject):
         await message.answer(
             f"Материалы по предмету «{subjects_cfg.subject_name(subject)}» "
@@ -550,10 +554,17 @@ async def menu_ask(message: Message, state: FSMContext) -> None:
         )
         return
     await state.set_state(ChatFlow.waiting_question)
-    await message.answer(
-        "❓ Задать вопрос\n\nНапиши, что хочешь узнать по курсу.",
-        reply_markup=mode_help_kb("ask"),
-    )
+    # Объяснение сразу на экране, без кнопки «Как это работает»: по названию
+    # режима ученик не понимал, что будет после нажатия (24.09.2026).
+    # Клавиатуру не шлём — режим она не меняет. Исключение — старая кнопка:
+    # её надо заменить новой, иначе она так и висит у ученика.
+    markup = None
+    if message.text == MENU_BTN_ASK_LEGACY:
+        markup = (
+            student_view_kb(subject, for_teacher=True) if role == ROLE_TEACHER
+            else main_menu_kb(subject, role)
+        )
+    await message.answer(ASK_SCREEN, reply_markup=markup)
 
 
 # ---------- Меню преподавателя ----------
@@ -604,7 +615,9 @@ async def _trainer_screen(teacher_id: int, subject: str):
             return f"\n⚠ {len(failed)} {word} не подключились: {reasons.pop()}"
         return f"\n⚠ Не подключились файлов: {len(failed)}"
 
-    has_sections = subjects_cfg.has_sections(subject) and bool(rows)
+    # Кнопка «Разделы» видна и до первой загрузки: там же настраивается
+    # программа, и начинать с неё логично, пока файлов ещё нет
+    has_sections = subjects_cfg.has_sections(subject)
     # Общие вопросы разбирает админ — у преподавателя только свои
     reported = content_provider.own_reports(
         await get_question_reports(teacher_id, subject), teacher_id, subject
@@ -614,10 +627,12 @@ async def _trainer_screen(teacher_id: int, subject: str):
         lines = ["👀 Мой тренажёр", "", "Пока пусто — загрузите свои билеты."]
         if failed:
             lines.append(warning())
-        return "\n".join(lines), trainer_kb(has_files=bool(files))
+        return "\n".join(lines), trainer_kb(has_sections=has_sections)
 
-    with_options = sum(1 for r in rows if any(r.get(f"Вар.{i}") for i in range(1, 6)))
-    text_answers = len(rows) - with_options
+    # Части билета ЦТ, а не «с вариантами / с текстовым ответом»: так
+    # преподаватель сам думает о своих вопросах (24.09.2026)
+    part_a = sum(1 for r in rows if (r.get("Часть") or "").strip() == "А")
+    part_b = len(rows) - part_a
     updated = _humanize_date(_parse_iso(document.get("updated_at")))
 
     lines = [
@@ -626,91 +641,26 @@ async def _trainer_screen(teacher_id: int, subject: str):
         "Готов к занятиям",
         f"{len(rows)} вопросов · обновлён {updated}",
         "",
-        f"С вариантами ответа — {with_options}",
-        f"С текстовым ответом — {text_answers}",
+        f"Часть А — {part_a}",
+        f"Часть В — {part_b}",
     ]
 
-    unsorted_count = sum(1 for r in rows if not (r.get("Раздел") or "").strip())
-    if has_sections and unsorted_count:
-        lines.append(f"\n{sections_lib.UNSORTED_TITLE} — {unsorted_count}")
-
+    # «Смешанные вопросы» и неподключившиеся файлы здесь не пишем: первое
+    # видно в «Разделах», о втором бот говорит сразу после загрузки
+    # (24.09.2026). На пустом тренажёре предупреждение остаётся — иначе
+    # «Пока пусто» без причины.
     if reported:
         lines.append(f"\n⚠️ Спорные вопросы — {len(reported)}")
 
-    if failed:
-        lines.append(warning())
-
     return "\n".join(lines), trainer_kb(
-        has_files=bool(files),
         has_sections=has_sections,
         has_reports=bool(reported),
     )
 
 
 # ---------- Разделы ----------
-
-def _sections_text(teacher_id: int, subject: str) -> tuple[str, bool]:
-    """Состав тренажёра по разделам. Второе значение — есть ли что раскладывать.
-
-    Пустые разделы не показываем: список программы длинный, а преподавателю
-    здесь важно, что у него уже есть, а не чего нет.
-    """
-    counts = teacher_content.counts_by_section(teacher_id, subject)
-    custom = teacher_content.custom_sections(teacher_id, subject)
-    custom_topics = teacher_content.custom_topics(teacher_id, subject)
-
-    lines = ["🗂 Разделы и темы", ""]
-    filled = 0
-    for section in sections_lib.merged(subject, custom):
-        # В разделе лежит и то, что положено в него самого, и то, что
-        # разложено по темам внутри: в итоге у раздела показывается сумма,
-        # а темы перечисляются под ним.
-        topics = [
-            (topic, counts.get(topic.key, 0))
-            for topic in sections_lib.merged_topics(subject, section.key, custom_topics)
-        ]
-        topics = [(topic, count) for topic, count in topics if count]
-        own = counts.get(section.key, 0)
-        total = own + sum(count for _, count in topics)
-
-        if total:
-            filled += 1
-            lines.append(f"{section.label} — {total}")
-            for topic, count in topics:
-                lines.append(f"   • {sections_lib.button_label(topic.title)} — {count}")
-
-    unsorted_count = counts.get("", 0)
-    if not filled and not unsorted_count:
-        return "🗂 Разделы\n\nПока ничего не загружено.", False
-
-    if not filled:
-        lines.append("Пока ничего не разложено.")
-
-    pending = teacher_content.files_without_section(teacher_id, subject)
-    if unsorted_count:
-        lines.append(f"\n{sections_lib.UNSORTED_TITLE} — {unsorted_count}")
-        if pending:
-            word = "файл" if len(pending) == 1 else "файла" if len(pending) < 5 else "файлов"
-            lines.append(
-                f"Сюда попали {len(pending)} {word} без раздела — "
-                "если это не готовые варианты, разложите их."
-            )
-
-    lines.append(
-        "\nРаздел и тема выбираются при загрузке файла "
-        "и относятся ко всему файлу целиком."
-    )
-    return "\n".join(lines), bool(pending)
-
-
-@router.callback_query(lambda c: c.data == "trainer:sections")
-async def trainer_sections(callback: CallbackQuery) -> None:
-    subject, role, _ = await _user_context(callback.from_user.id)
-    await callback.answer()
-    if role != ROLE_TEACHER:
-        return
-    text, has_unsorted = _sections_text(callback.from_user.id, subject)
-    await _replace(callback.message, text, trainer_sections_kb(has_unsorted))
+# Экран «🗂 Разделы» — в bot/handlers/sections_editor.py: там же и правка
+# программы, чтобы о разделах был один экран, а не два.
 
 
 # ---------- Спорные вопросы ----------
@@ -861,55 +811,11 @@ async def report_card_action(callback: CallbackQuery, state: FSMContext) -> None
     await _replace(callback.message, text, markup)
 
 
-# Сколько файлов показывать списком, остальные — числом
-FILES_SHOWN = 8
-
-
-def _files_text(teacher_id: int, subject: str) -> str:
-    files = teacher_content.files_overview(teacher_id, subject)
-    if not files:
-        return "📎 Загруженные файлы\n\nПока ничего не загружено."
-
-    assigned = teacher_content.file_sections(teacher_id, subject)
-    custom = teacher_content.custom_sections(teacher_id, subject)
-
-    lines = ["📎 Загруженные файлы", ""]
-    for item in files[:FILES_SHOWN]:
-        accepted = item["accepted"]
-        if accepted:
-            section = assigned.get(str(item["filename"]), "")
-            where = f" · {sections_lib.title_of(subject, section, custom)}" if section else ""
-            lines.append(
-                f"✓ {item['filename']} — {accepted} {questions_word(accepted)}{where}"
-            )
-        else:
-            lines.append(f"✗ {item['filename']} — {item['problem']}")
-
-    hidden = len(files) - FILES_SHOWN
-    if hidden > 0:
-        lines.append(f"   …и ещё {hidden}")
-
-    # Снимаем главный страх: боятся наплодить дублей и потому не перезаливают
-    lines.append(
-        "\nПовторная загрузка файла заменяет его вопросы — дубликатов не будет."
-    )
-    return "\n".join(lines)
-
-
-@router.callback_query(lambda c: c.data == "trainer:files")
-async def trainer_files(callback: CallbackQuery) -> None:
-    subject, role, _ = await _user_context(callback.from_user.id)
-    await callback.answer()
-    if role != ROLE_TEACHER:
-        return
-    await _replace(
-        callback.message,
-        _files_text(callback.from_user.id, subject),
-        back_to_trainer_kb(),
-    )
-
-
-@router.callback_query(lambda c: c.data == "trainer:root")
+# Экрана «📎 Файлы» больше нет (24.09.2026): преподаватель думает разделами
+# и темами, имена файлов он забывает через день, а где что лежит — видно
+# в «🗂 Разделах». Кнопка из старых сообщений ведёт на экран тренажёра.
+# Когда понадобится удалять файлы, их место — внутри раздела или темы.
+@router.callback_query(lambda c: c.data in ("trainer:root", "trainer:files"))
 async def trainer_root(callback: CallbackQuery) -> None:
     subject, role, _ = await _user_context(callback.from_user.id)
     await callback.answer()

@@ -15,6 +15,10 @@ class TeacherUpload(StatesGroup):
     waiting_topic_title = State()   # ждём название своей темы
 
 
+class SectionsEdit(StatesGroup):
+    waiting_title = State()         # экран «Разделы»: название нового или новое имя
+
+
 class Register(StatesGroup):
     waiting_name = State()
 

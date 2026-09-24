@@ -17,7 +17,7 @@ from typing import Dict, List
 MODE_LABELS: Dict[str, str] = {
     "tests": "🎯 Тренировка",
     "flashcards": "⚡ Карточки",
-    "ask": "❓ Задать вопрос",
+    "ask": "🤖 ИИ-помощник",
     "topics": "🗂 По темам",
     "mistakes": "🔁 Мои ошибки",
     "progress": "📈 Мой прогресс",

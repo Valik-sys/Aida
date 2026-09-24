@@ -26,6 +26,9 @@ SECTION_NAMES = [
 MENU_BTN_TESTS = subjects_cfg.MODE_LABELS["tests"]
 MENU_BTN_FLASHCARDS = subjects_cfg.MODE_LABELS["flashcards"]
 MENU_BTN_ASK = subjects_cfg.MODE_LABELS["ask"]
+# Прежнее название. Клавиатура живёт у ученика до замены, и старая кнопка
+# должна работать, пока бот её не обновит (переименовано 24.09.2026).
+MENU_BTN_ASK_LEGACY = "❓ Задать вопрос"
 MENU_BTN_TOPICS = subjects_cfg.MODE_LABELS["topics"]
 MENU_BTN_MISTAKES = subjects_cfg.MODE_LABELS["mistakes"]
 MENU_BTN_PROGRESS = subjects_cfg.MODE_LABELS["progress"]
@@ -58,7 +61,7 @@ BTN_CANCEL_SHARE = "Отмена"
 # Все подписи кнопок нижней клавиатуры. Нужны, чтобы режимы, ожидающие ввода,
 # не проглатывали нажатия меню: иначе из такого режима не выйти.
 ALL_MENU_BUTTONS = frozenset({
-    MENU_BTN_TESTS, MENU_BTN_FLASHCARDS, MENU_BTN_ASK,
+    MENU_BTN_TESTS, MENU_BTN_FLASHCARDS, MENU_BTN_ASK, MENU_BTN_ASK_LEGACY,
     MENU_BTN_TOPICS, MENU_BTN_MISTAKES, MENU_BTN_PROGRESS, MENU_BTN_HOME,
     MENU_BTN_UPLOAD, MENU_BTN_MY_TRAINER, MENU_BTN_STUDENTS,
     MENU_BTN_SETTINGS, MENU_BTN_STUDENT_VIEW, MENU_BTN_BACK_TO_CABINET,
@@ -109,19 +112,13 @@ def teacher_cabinet_kb(subject: str | None = None) -> ReplyKeyboardMarkup:
 
 
 def trainer_kb(
-    has_files: bool = False,
     has_sections: bool = False,
     has_reports: bool = False,
 ) -> InlineKeyboardMarkup:
-    """Экран тренажёра: опись загруженного и быстрый переход к загрузке."""
+    """Экран тренажёра: разделы, спорные вопросы и быстрый переход к загрузке."""
     rows: List[List[InlineKeyboardButton]] = []
-    top: List[InlineKeyboardButton] = []
     if has_sections:
-        top.append(InlineKeyboardButton(text="🗂 Разделы", callback_data="trainer:sections"))
-    if has_files:
-        top.append(InlineKeyboardButton(text="📎 Файлы", callback_data="trainer:files"))
-    if top:
-        rows.append(top)
+        rows.append([InlineKeyboardButton(text="🗂 Разделы", callback_data="trainer:sections")])
     # Отдельной строкой и только когда есть что разбирать: пустая кнопка
     # каждый день мозолила бы глаза
     if has_reports:
@@ -294,16 +291,6 @@ def move_file_kb(
         text=f"Оставить в «{short_text(old_label, 30)}»",
         callback_data=f"upl:keep:{file_token}",
     )])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def trainer_sections_kb(has_unsorted: bool = False) -> InlineKeyboardMarkup:
-    rows: List[List[InlineKeyboardButton]] = []
-    if has_unsorted:
-        rows.append([InlineKeyboardButton(
-            text="🗂 Разложить по разделам", callback_data="trainer:sort"
-        )])
-    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="trainer:root")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -659,7 +646,7 @@ def tests_root_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🎯 Полный билет · 38 вопросов", callback_data="tests:ticket")],
-            [InlineKeyboardButton(text="✍️ Только часть Б", callback_data="tests:part_b")],
+            [InlineKeyboardButton(text="✍️ Только часть В", callback_data="tests:part_b")],
             [InlineKeyboardButton(text=BTN_BY_SECTION, callback_data="tests:by_section")],
             [InlineKeyboardButton(text="📚 Тесты прошлых лет", callback_data="tests:archive")],
             [
@@ -843,7 +830,7 @@ def question_report_kb(qhash: str) -> InlineKeyboardMarkup:
     """
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
-            text="⚠️ Что-то не так", callback_data=f"{REPORT_PREFIX}:{qhash}"
+            text="🚩 Проблема с вопросом", callback_data=f"{REPORT_PREFIX}:{qhash}"
         )]
     ])
 

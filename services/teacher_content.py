@@ -164,6 +164,10 @@ def rebuild(
             "updated_at": _now(),
             "sections": custom,
             "topics": custom_topics_map,
+            # Правка программы живёт не в файлах, а в манифесте, и пересборка
+            # не должна её стирать — иначе /reparse вернул бы всем скрытое
+            HIDDEN_FIELD: list(previous.get(HIDDEN_FIELD) or []),
+            RETIRED_FIELD: list(previous.get(RETIRED_FIELD) or []),
             "files": manifest_files,
             "accepted_total": result.total_accepted,
             "rejected_total": result.total_rejected,
@@ -313,7 +317,7 @@ def add_custom_section(tg_id: int, subject: str, title: str) -> Optional[str]:
         if existing.casefold() == title.casefold():
             return key
 
-    key = sections_lib.next_custom_key(custom)
+    key = sections_lib.next_custom_key(custom, manifest.get(RETIRED_FIELD))
     custom[key] = title
     manifest["sections"] = custom
     storage.write_json(storage.teacher_manifest_path(tg_id, subject), manifest)
@@ -347,11 +351,123 @@ def add_custom_topic(tg_id: int, subject: str, section: str, title: str) -> Opti
         if sections_lib.section_of(key) == section and existing.casefold() == title.casefold():
             return key
 
-    key = sections_lib.next_custom_topic_key(section, topics)
+    key = sections_lib.next_custom_topic_key(section, topics, manifest.get(RETIRED_FIELD))
     topics[key] = title
     manifest["topics"] = topics
     storage.write_json(storage.teacher_manifest_path(tg_id, subject), manifest)
     return key
+
+
+# ---------- Правка программы: скрыть, удалить, переименовать ----------
+#
+# Стандартную сетку преподаватель не удаляет, а скрывает: к ней привязаны
+# общие вопросы и теория, и она одна на всех. Своё — удаляет по-настоящему.
+# Место с его файлами ни скрыть, ни удалить нельзя, пока файлы не переложены:
+# иначе вопросы молча пропали бы у учеников. Это проверяет экран, здесь —
+# только запись.
+
+HIDDEN_FIELD = "hidden"
+RETIRED_FIELD = "retired"
+
+
+def hidden_places(tg_id: int, subject: str) -> set:
+    """Скрытые места программы: ключи разделов и тем."""
+    data = load_manifest(tg_id, subject).get(HIDDEN_FIELD) or []
+    return {str(k) for k in data} if isinstance(data, list) else set()
+
+
+def set_hidden(tg_id: int, subject: str, keys, hidden: bool) -> None:
+    """Скрывает или возвращает места программы. Свои места сюда не попадают."""
+    manifest = load_manifest(tg_id, subject)
+    current = {str(k) for k in (manifest.get(HIDDEN_FIELD) or [])}
+    keys = {str(k) for k in keys if k and not sections_lib.is_custom(str(k))}
+    current = current | keys if hidden else current - keys
+    manifest[HIDDEN_FIELD] = sorted(current)
+    storage.write_json(storage.teacher_manifest_path(tg_id, subject), manifest)
+
+
+def rename_custom_place(tg_id: int, subject: str, key: str, title: str) -> bool:
+    """Новое название своего раздела или своей темы."""
+    title = sections_lib.clean_title(title)
+    if not title or not sections_lib.is_custom(key):
+        return False
+    manifest = load_manifest(tg_id, subject)
+    field_name = "topics" if sections_lib.is_topic(key) else "sections"
+    table = {str(k): str(v) for k, v in (manifest.get(field_name) or {}).items()}
+    if key not in table:
+        return False
+    table[key] = title
+    manifest[field_name] = table
+    storage.write_json(storage.teacher_manifest_path(tg_id, subject), manifest)
+    return True
+
+
+def delete_custom_place(tg_id: int, subject: str, key: str) -> bool:
+    """Удаляет свой раздел (вместе с его темами) или свою тему.
+
+    Ключ уходит в список удалённых: новый раздел его не получит, и старые
+    записи журнала не окажутся в чужом месте.
+    """
+    if not sections_lib.is_custom(key):
+        return False
+    manifest = load_manifest(tg_id, subject)
+    sections = {str(k): str(v) for k, v in (manifest.get("sections") or {}).items()}
+    topics = {str(k): str(v) for k, v in (manifest.get("topics") or {}).items()}
+
+    if sections_lib.is_topic(key):
+        if key not in topics:
+            return False
+        removed = [key]
+    else:
+        if key not in sections:
+            return False
+        removed = [key] + [k for k in topics if sections_lib.section_of(k) == key]
+
+    for k in removed:
+        sections.pop(k, None)
+        topics.pop(k, None)
+    retired = {str(k) for k in (manifest.get(RETIRED_FIELD) or [])} | set(removed)
+
+    manifest["sections"] = sections
+    manifest["topics"] = topics
+    manifest[RETIRED_FIELD] = sorted(retired)
+    storage.write_json(storage.teacher_manifest_path(tg_id, subject), manifest)
+    return True
+
+
+def files_in_place(tg_id: int, subject: str, key: str) -> List[str]:
+    """Файлы, лежащие в месте. У раздела — и в самом разделе, и в его темах."""
+    if not key:
+        return []
+    out: List[str] = []
+    for name, place in file_sections(tg_id, subject).items():
+        if not place:
+            continue
+        inside = place == key if sections_lib.is_topic(key) else sections_lib.section_of(place) == key
+        if inside:
+            out.append(name)
+    return out
+
+
+def questions_in_place(tg_id: int, subject: str, key: str) -> int:
+    """Сколько вопросов преподавателя лежит в месте (с темами раздела)."""
+    total = 0
+    for place, count in counts_by_section(tg_id, subject).items():
+        if not place:
+            continue
+        inside = place == key if sections_lib.is_topic(key) else sections_lib.section_of(place) == key
+        if inside:
+            total += count
+    return total
+
+
+def move_place_files(tg_id: int, subject: str, key: str, target: str) -> int:
+    """Перекладывает все файлы места в другое место. Возвращает число файлов."""
+    moved = 0
+    for name in files_in_place(tg_id, subject, key):
+        if set_file_section(tg_id, subject, name, target):
+            moved += 1
+    return moved
 
 
 def set_file_section(tg_id: int, subject: str, filename: str, section: str) -> bool:

@@ -432,3 +432,273 @@ class TestHandTypedOptionNumbers:
 
 def q_index(expected: str) -> int:
     return int(expected) - 1
+
+
+class TestAnswerUnderQuestion:
+    """Ответ прямо под вопросом, без ключа в конце.
+
+    Клиент, 24.09.2026: «бот не принимает файл, если стоят ответы после
+    каждого вопроса сразу». Строка «Ответ 5» уходила пятым вариантом,
+    у вопроса не было ответа, и фильтр отбрасывал весь файл.
+    """
+
+    def _parse(self, lines):
+        from services.ticket_parser import parse_lines
+
+        questions, _a, _b = parse_lines(lines)
+        return {f"{q.part}{q.num}": q for q in questions}
+
+    def test_part_a_and_b(self):
+        qs = self._parse([
+            "Часть А",
+            "А1. Возможная прародина человека:",
+            "1) Северная Америка    2) Южная Америка    3) Европа   4) Австралия    5) Африка",
+            "Ответ 5",
+            "А2. Кто основал Полоцкое княжество?",
+            "1) Рогволод", "2) Всеслав", "3) Изяслав",
+            "Ответ: 1",
+            "Часть В",
+            "В1. Расставьте периоды истории в хронологической последовательности.",
+            "А) Новейшее время", "Б) Средние века", "В) Новое время", "Г) Древний мир",
+            "Ответ  ГБВА",
+            "В2. Глава рода, наиболее опытный человек - ______________",
+            "Ответ СТАРЕЙШИНА.",
+            "В3. Выберите правильные утверждения о соседской общине:",
+            "1) первое", "2) второе", "3) третье", "4) четвёртое", "5) пятое",
+            "Отв. — 5, 3, 1",
+        ])
+        assert qs["А1"].expected == "5"
+        assert qs["А1"].options == ["Северная Америка", "Южная Америка", "Европа", "Австралия", "Африка"]
+        assert qs["А2"].expected == "1"
+        assert all("Ответ" not in o for q in qs.values() for o in q.options)
+        assert qs["В1"].expected == "ГБВА"
+        assert "Ответ" not in qs["В1"].question_text
+        assert qs["В2"].expected == "СТАРЕЙШИНА"
+        assert qs["В3"].expected == "135"
+        assert all(validate(q) is None for q in qs.values())
+
+    def test_key_at_the_end_wins(self):
+        """Решено 24.09.2026: если есть и то и другое, прав ключ — как раньше."""
+        qs = self._parse([
+            "А1. Кто основал Полоцкое княжество?",
+            "1) Рогволод", "2) Всеслав", "3) Изяслав",
+            "Ответ 2",
+            "Ответы:", "А1 — 1",
+        ])
+        assert qs["А1"].expected == "1"
+
+    def test_instruction_is_not_an_answer(self):
+        """«Ответ запишите цифрами…» — часть задания, а не ответ."""
+        qs = self._parse([
+            "В1. Определите группы индоевропейских народов Европы.",
+            "Ответ запишите цифрами в порядке возрастания. Например: 123.",
+            "1) италики;   2) армяне;    3) греки;     4) кельты;     5) балты.",
+            "Ответ 145",
+        ])
+        assert qs["В1"].expected == "145"
+        assert "Ответ запишите цифрами" in qs["В1"].question_text
+
+    def test_answer_at_the_end_of_the_line(self):
+        qs = self._parse([
+            "В1. Община, в которой родство велось по женской линии, - это ___ род. Ответ  МАТЕРИНСКИЙ",
+        ])
+        assert qs["В1"].expected == "МАТЕРИНСКИЙ"
+        assert qs["В1"].question_text.endswith("род.")
+
+    def test_lowercase_answer_mid_sentence_is_kept_in_text(self):
+        """В середине задания «ответ» со строчной буквы — не ответ."""
+        qs = self._parse([
+            "В1. Укажите год, ответ дайте числом: Люблинская уния была заключена в",
+            "Ответ 1569",
+        ])
+        assert qs["В1"].expected == "1569"
+        assert "ответ дайте числом" in qs["В1"].question_text
+
+    def test_empty_answer_blank_is_dropped(self):
+        """Бланк «Ответ:» под заданием — не ответ и не текст вопроса."""
+        qs = self._parse([
+            "В1. Установите последовательность: А) Крево Б) Люблин В) Грюнвальд",
+            "Ответ:",
+            "Ответы:", "В1 — АВБ",
+        ])
+        assert qs["В1"].expected == "АВБ"
+        assert "Ответ" not in qs["В1"].question_text
+
+    def test_preposition_before_dates_is_not_a_key(self):
+        """«в 24-23 тыс. … в 22-21-м тыс.» принималось за строку ключа
+        «В24 — …», и всё ниже неё выпадало: из 80 вопросов нашлось 25."""
+        qs = self._parse([
+            "А1. Стоянка возле деревни Бердыж появилась:",
+            "1)  40‒35 тыс. лет назад;      2)  в 24-23 тыс. до н. э.;     3)  в 22-21-м тыс. до н. э.;",
+            "4)  в начале 2-го тыс. до н. э.;     5)  в VII в. до н. э.",
+            "Ответ 3",
+            "А2. На территории Беларуси в шахтах добывали:",
+            "1) серебро;   2) кремень;     3) соль;   4) торф;        5) олово.",
+            "Ответ 2",
+        ])
+        assert set(qs) == {"А1", "А2"}
+        assert qs["А1"].options[4] == "в VII в. до н. э"
+        assert qs["А2"].expected == "2"
+
+
+class TestOptionsLayout:
+    def _parse(self, lines):
+        from services.ticket_parser import parse_lines
+
+        questions, _a, _b = parse_lines(lines + ["Ответы:", "А1 — 4"])
+        return questions[0]
+
+    def test_list_above_options_stays_in_question(self):
+        """Перечень событий над вариантами-кодами раньше затирался вариантами."""
+        q = self._parse([
+            "А1.  Расставьте в правильной последовательности:",
+            "1) заселение Европы индоевропейцами",
+            "2) появление кроманьонцев",
+            "3) неолитическая революция на Ближнем Востоке",
+            "4) появление соседской общины",
+            "1) 2431            2) 3214          3) 2134           4) 2314",
+        ])
+        assert q.options[:4] == ["2431", "3214", "2134", "2314"]
+        assert "1) заселение Европы индоевропейцами" in q.question_text
+        assert "4) появление соседской общины" in q.question_text
+
+    def test_wrapped_question_tail_is_not_lost(self):
+        q = self._parse([
+            "А1. Одним из первых занятий древних людей на территории Беларуси",
+            "являлось(-ась):",
+            "1) земледелие;    2) торговля;    3) охота;    4) ремесло;    5) животноводство.",
+        ])
+        assert q.question_text.endswith("являлось(-ась):")
+        assert q.options == ["земледелие", "торговля", "охота", "ремесло", "животноводство"]
+
+
+def _tmp_dir() -> Path:
+    import tempfile
+
+    return Path(tempfile.mkdtemp(prefix="aida_parser_"))
+
+
+class TestWordLayout:
+    """Автонумерация Word, перенос строки в абзаце и таблица внутри задания."""
+
+    @staticmethod
+    def _el(tag, **attrs):
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+
+        e = OxmlElement(tag)
+        for k, v in attrs.items():
+            e.set(qn(f"w:{k}"), v)
+        return e
+
+    def _add_list(self, doc, num_id, start=1):
+        """Список «%1)» с началом start — как Word заводит его под вопросом."""
+        numbering = doc.part.numbering_part.element
+        abstract = self._el("w:abstractNum", abstractNumId=str(100 + num_id))
+        lvl = self._el("w:lvl", ilvl="0")
+        lvl.append(self._el("w:start", val=str(start)))
+        lvl.append(self._el("w:numFmt", val="decimal"))
+        lvl.append(self._el("w:lvlText", val="%1)"))
+        abstract.append(lvl)
+        numbering.insert(0, abstract)
+        num = self._el("w:num", numId=str(num_id))
+        num.append(self._el("w:abstractNumId", val=str(100 + num_id)))
+        numbering.append(num)
+
+    def _numbered(self, doc, text, num_id):
+        p = doc.add_paragraph(text)
+        num_pr = self._el("w:numPr")
+        num_pr.append(self._el("w:ilvl", val="0"))
+        num_pr.append(self._el("w:numId", val=str(num_id)))
+        p._p.get_or_add_pPr().append(num_pr)
+        return p
+
+    def test_client_layout(self):
+        import docx
+        from services.ticket_parser import parse_docx
+
+        doc = docx.Document()
+        self._add_list(doc, 91)
+        self._add_list(doc, 92)
+        self._add_list(doc, 93, start=4)
+        self._add_list(doc, 94)
+
+        doc.add_paragraph("Часть А")
+        doc.add_paragraph("А1. Необходимость объединения людей в родовые общины объясняется:")
+        for text in ["созданием первых государств;", "сложными условиями жизни;",
+                     "ведением производящего хозяйства;", "появлением религиозных верований;"]:
+            self._numbered(doc, text, 91)
+        # Ответ после переноса строки (Shift+Enter) в последнем варианте
+        self._numbered(doc, "увеличением численности населения.\n Ответ 2", 91)
+
+        doc.add_paragraph("А2. Примерно в III тыс. до н.э. люди на территории Беларуси начали:")
+        self._numbered(doc, "строить города;    2) выплавлять железо;    3) создавать государства;", 92)
+        self._numbered(doc, "заниматься животноводством;     5) объединяться в племена.", 93)
+        doc.add_paragraph("Ответ 4")
+
+        doc.add_paragraph("Часть В")
+        doc.add_paragraph("В1. Выберите правильные утверждения. Ответ запишите цифрами.")
+        for text in ["первое утверждение;", "второе утверждение;", "третье утверждение."]:
+            self._numbered(doc, text, 94)
+        doc.add_paragraph("Ответ 13")
+
+        doc.add_paragraph("В2. Установите соответствие.")
+        table = doc.add_table(rows=2, cols=2)
+        table.cell(0, 0).text = "Событие"
+        table.cell(0, 1).text = "Период"
+        table.cell(1, 0).text = "А) переход к оседлости\nБ) возникновение металлургии"
+        table.cell(1, 1).text = "1) палеолит\n2) бронзовый век\n3) мезолит"
+        doc.add_paragraph("Ответ  А3Б2")
+
+        path = _tmp_dir() / "client.docx"
+        doc.save(path)
+
+        result = parse_docx(path)
+        assert result.rejected == []
+        rows = {f"{r['Часть']}{r['№']}": r for r in result.rows}
+
+        a1 = rows["А1"]
+        assert a1["Ответ"] == "2"
+        assert a1["Вар.1"] == "созданием первых государств"
+        assert a1["Вар.5"] == "увеличением численности населения"
+
+        a2 = rows["А2"]
+        assert a2["Ответ"] == "4"
+        assert [a2[f"Вар.{i}"] for i in range(1, 6)] == [
+            "строить города", "выплавлять железо", "создавать государства",
+            "заниматься животноводством", "объединяться в племена",
+        ]
+
+        # Номера автосписка видны ученику: без них «13» не к чему отнести
+        b1 = rows["В1"]["Вопрос"]
+        assert "1) первое утверждение;" in b1
+        assert "3) третье утверждение." in b1
+
+        # Таблица читается внутри задания, по столбцам
+        assert rows["В2"]["Вопрос"].split("\n") == [
+            "Установите соответствие.",
+            "Событие", "А) переход к оседлости", "Б) возникновение металлургии",
+            "Период", "1) палеолит", "2) бронзовый век", "3) мезолит",
+        ]
+        assert rows["В2"]["Ответ"] == "А3Б2"
+
+    def test_style_numbering_restarts_per_question(self):
+        """«Нумерованный список» стилем — один список на весь документ.
+        Второй вопрос не должен получить варианты 4)–6)."""
+        import docx
+        from services.ticket_parser import parse_docx
+
+        doc = docx.Document()
+        doc.add_paragraph("А1. Кто основал Полоцкое княжество?")
+        for text in ["Рогволод", "Всеслав", "Изяслав"]:
+            doc.add_paragraph(text, style="List Number")
+        doc.add_paragraph("Ответ 1")
+        doc.add_paragraph("А2. Столица Великого княжества Литовского:")
+        for text in ["Вильно", "Полоцк", "Новогрудок"]:
+            doc.add_paragraph(text, style="List Number")
+        doc.add_paragraph("Ответ 1")
+        path = _tmp_dir() / "styled.docx"
+        doc.save(path)
+
+        rows = {r["№"]: r for r in parse_docx(path).rows}
+        assert [rows["2"][f"Вар.{i}"] for i in range(1, 4)] == ["Вильно", "Полоцк", "Новогрудок"]

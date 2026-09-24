@@ -21,6 +21,7 @@ from bot.handlers.tests import router as tests_router
 from bot.handlers.flashcards import router as flashcards_router
 from bot.handlers.chat import router as chat_router
 from bot.handlers.teacher_upload import router as teacher_upload_router
+from bot.handlers.sections_editor import router as sections_editor_router
 from bot.handlers.topics import router as topics_router
 from bot.reminders import reminder_loop
 from rag.indexer import build_vectorstore
@@ -126,6 +127,7 @@ async def main() -> None:
     dp.include_router(subscription_router)
     dp.include_router(base_reports_router)
     dp.include_router(teacher_upload_router)
+    dp.include_router(sections_editor_router)
     dp.include_router(menu_router)
     dp.include_router(update_router)
     dp.include_router(tests_router)

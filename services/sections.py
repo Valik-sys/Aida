@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 import subjects as subjects_cfg
 
@@ -107,14 +107,38 @@ def is_valid(
     return any(s.key == key for s in merged(subject, custom))
 
 
-def next_custom_key(custom: Optional[Dict[str, str]] = None) -> str:
+def is_custom(key: str) -> bool:
+    """Своё место преподавателя: раздел «c1» или тема «6_c1»."""
+    last = (key or "").split(TOPIC_SEP)[-1]
+    return last.startswith(CUSTOM_PREFIX) and last[len(CUSTOM_PREFIX):].isdigit()
+
+
+def is_hidden(key: str, hidden: Optional[Iterable[str]]) -> bool:
+    """Скрыто ли место: оно само или раздел, в котором лежит тема.
+
+    Скрыть можно только место программы — своё преподаватель удаляет.
+    Скрытый раздел уводит с экранов и все свои темы, иначе тема висела бы
+    без раздела, в который её не зайти.
+    """
+    if not key or not hidden:
+        return False
+    hidden = set(hidden)
+    return key in hidden or section_of(key) in hidden
+
+
+def next_custom_key(
+    custom: Optional[Dict[str, str]] = None,
+    retired: Optional[Iterable[str]] = None,
+) -> str:
     """Следующий свободный ключ своего раздела.
 
     Считаем от максимума, а не от количества: иначе после удаления раздела
-    ключ переиспользуется и старые файлы уедут в чужой раздел.
+    ключ переиспользуется и старые файлы уедут в чужой раздел. По той же
+    причине в счёт идут и удалённые ключи (`retired`): у последнего раздела
+    максимум после удаления падал бы, и его ключ достался бы новому.
     """
     used = []
-    for key in (custom or {}):
+    for key in list(custom or {}) + list(retired or []):
         if key.startswith(CUSTOM_PREFIX) and key[len(CUSTOM_PREFIX):].isdigit():
             used.append(int(key[len(CUSTOM_PREFIX):]))
     return f"{CUSTOM_PREFIX}{max(used, default=0) + 1}"
@@ -191,15 +215,17 @@ def topic_title(
 def next_custom_topic_key(
     section: str,
     custom: Optional[Dict[str, str]] = None,
+    retired: Optional[Iterable[str]] = None,
 ) -> str:
     """Следующий свободный ключ своей темы в этом разделе: "6_c1", "6_c2"…
 
-    Как и у разделов, счёт идёт от максимума, а не от количества: иначе
-    после удаления темы ключ переиспользуется и старые файлы уедут в чужую.
+    Как и у разделов, счёт идёт от максимума, а не от количества, и удалённые
+    ключи (`retired`) тоже в счёт: иначе ключ переиспользуется и старые
+    записи уедут в чужую тему.
     """
     prefix = f"{section}{TOPIC_SEP}{CUSTOM_PREFIX}"
     used = []
-    for key in (custom or {}):
+    for key in list(custom or {}) + list(retired or []):
         if key.startswith(prefix) and key[len(prefix):].isdigit():
             used.append(int(key[len(prefix):]))
     return f"{prefix}{max(used, default=0) + 1}"

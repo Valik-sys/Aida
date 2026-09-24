@@ -200,38 +200,7 @@ class TestCustomSections:
 
 
 class TestScreens:
-    """Экран «Разделы» и кнопки выбора."""
-
-    def test_lists_only_filled_sections(self, env):
-        from bot.handlers.menu import _sections_text
-
-        name = _upload(SAMPLE_ONE)
-        teacher_content.rebuild(TEACHER, SUBJECT, {name: "4"})
-
-        text, has_unsorted = _sections_text(TEACHER, SUBJECT)
-
-        assert "4. Раннее Новое время" in text
-        assert "1. Древнейшие цивилизации" not in text  # пустые не показываем
-        assert has_unsorted is False
-
-    def test_unsorted_shown_as_mixed_questions(self, env):
-        from bot.handlers.menu import _sections_text
-
-        _upload(SAMPLE_ONE)
-        teacher_content.rebuild(TEACHER, SUBJECT)
-
-        text, has_unsorted = _sections_text(TEACHER, SUBJECT)
-
-        # Одно название и у преподавателя, и у ученика
-        assert sections_lib.UNSORTED_TITLE in text
-        assert has_unsorted is True
-
-    def test_empty_trainer(self, env):
-        from bot.handlers.menu import _sections_text
-
-        text, has_unsorted = _sections_text(TEACHER, SUBJECT)
-        assert "Пока ничего не загружено" in text
-        assert has_unsorted is False
+    """Кнопки выбора раздела. Сам экран «Разделы» — в test_program_edit.py."""
 
     def test_upload_keyboard_carries_section_keys(self):
         from bot.keyboards.inline import SEC_PREFIX, sections_kb_for_upload
